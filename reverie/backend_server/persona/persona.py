@@ -35,7 +35,9 @@ from norm.norm_reflect import *
 
 from norm.norm_evaluate import *
 
-class Persona: 
+from norm.violation_detection import detect_violations, process_violations
+
+class Persona:
   def __init__(self, name, folder_mem_saved=False):
     # PERSONA BASE STATE 
     # <name> is the full name of the persona. This is a unique identifier for
@@ -233,8 +235,13 @@ class Persona:
 
     norms_evaluate(self, personas)
 
-    # Main cognitive sequence begins here. 
+    # Main cognitive sequence begins here.
     perceived = self.perceive(maze)
+    # Violation detection on perceived events
+    if hasattr(self, 'reputation_system'):
+      violations = detect_violations(self, perceived, personas)
+      if violations:
+        process_violations(self, violations, personas, self.reputation_system)
     retrieved = self.retrieve(perceived)
     # retrieved_norm = norm_retrieve(self, perceived)
     plan = self.plan(maze, personas, new_day, retrieved, perceived)

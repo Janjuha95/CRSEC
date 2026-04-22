@@ -1044,3 +1044,42 @@ def run_gpt_prompt_daily_plan_v2(persona, wake_up_hour, curr_act_norm, test_inpu
                           prompt_input, prompt, output)
 
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+
+
+def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verbose=False):
+    def create_prompt_input(event_desc, norm_content, observer_name):
+        prompt_input = []
+        prompt_input += [event_desc]
+        prompt_input += [norm_content]
+        prompt_input += [observer_name]
+        return prompt_input
+
+    def __func_validate(gpt_response, prompt=""):
+        try:
+            parsed = json.loads(gpt_response.strip())
+            for key in ("violation", "severity", "certainty", "response"):
+                if key not in parsed:
+                    return False
+            return True
+        except:
+            return False
+
+    def __func_clean_up(gpt_response, prompt=""):
+        return json.loads(gpt_response.strip())
+
+    def get_fail_safe():
+        return {"violation": False, "severity": 0, "certainty": 0, "response": "ignore"}
+
+    gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 150,
+                 "temperature": 0, "top_p": 1, "stream": False,
+                 "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
+    prompt_template = "norm/defection_prompt/violation_check_v1.txt"
+    prompt_input = create_prompt_input(event_desc, norm_content, observer_name)
+    prompt = generate_prompt(prompt_input, prompt_template)
+
+    fail_safe = get_fail_safe()
+    output = GPT4_safe_generate_response_OLD(prompt, 3, fail_safe,
+                                             __func_validate, __func_clean_up)
+    if debug or verbose:
+        print_run_prompts_norm(prompt_template, gpt_param, prompt_input, prompt, output)
+    return output, [output, prompt, gpt_param, prompt_input, fail_safe]

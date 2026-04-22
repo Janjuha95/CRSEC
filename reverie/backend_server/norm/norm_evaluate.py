@@ -462,6 +462,10 @@ def generate_normal_norm_utility(norm, persona):
         [score,reason]
     '''
     if debug: print("GNS FUNCTION: <generate_normal_norm_utility>")
+    # Defector agents use self-interested utility scoring
+    if persona.scratch.is_defector():
+        from norm.defection_engine import get_defector_norm_utility
+        return get_defector_norm_utility(norm.content, persona)
     snu = SpecificNormUtility(persona.scratch.get_str_iss())
     return snu.specific_norm_utility(norm.content)
 

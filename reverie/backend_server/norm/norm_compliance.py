@@ -22,6 +22,12 @@ def generate_revise_identity_currently(persona, plan_note, thought_note):
     for norm_id, a_norm in persona.norm_database.act_norm.items():
         if a_norm.activation_state == False:
             continue
+        if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+            from norm.defection_engine import calculate_defection_utility
+            decision, reasoning = calculate_defection_utility(
+                persona, a_norm, {"description": "daily planning"})
+            if decision == "defect":
+                continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
         curr_act_norms += a_norm.content
         curr_act_norms += "\n"
@@ -36,6 +42,12 @@ def generate_revise_identity_daily_plan_req(persona):
     for norm_id, a_norm in persona.norm_database.act_norm.items():
         if a_norm.activation_state == False:
             continue
+        if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+            from norm.defection_engine import calculate_defection_utility
+            decision, reasoning = calculate_defection_utility(
+                persona, a_norm, {"description": "daily planning"})
+            if decision == "defect":
+                continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
         curr_act_norms += a_norm.content
         curr_act_norms += "\n"
@@ -85,6 +97,12 @@ def generate_new_daily_plan(persona, wake_up_hour):
     for norm_id, a_norm in persona.norm_database.act_norm.items():
         if a_norm.activation_state == False:
             continue
+        if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+            from norm.defection_engine import calculate_defection_utility
+            decision, reasoning = calculate_defection_utility(
+                persona, a_norm, {"description": "daily planning"})
+            if decision == "defect":
+                continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
         curr_act_norms += a_norm.content
         curr_act_norms += "\n"

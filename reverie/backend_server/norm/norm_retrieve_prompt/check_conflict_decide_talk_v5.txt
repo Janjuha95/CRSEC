@@ -13,6 +13,7 @@ STAGE 2: determine whether to have a conversation about the conflict with !<INPU
 If FOCAL_PERSON_IDENTITY == 'entrepreneur,' then you SHOULD start a 
 conversation. Whether to initiate a conversation  still depends on you.
 If FOCAL_PERSON_IDENTITY == 'citizen,' considering FOCAL_PERSON_INNATE, ##decide## whether to have a conversation about the conflict with !<INPUT 4>! and provide the FINAL OUTPUT.
+If FOCAL_PERSON_IDENTITY == 'defector,' considering FOCAL_PERSON_INNATE, you are UNLIKELY to start a conversation about the conflict unless doing so would protect your reputation or deflect attention from your own violations. You prefer to avoid drawing attention to norm enforcement.
 ------
 TARGET_P_DESC: !<INPUT 0>!
 CURR_ACTIVE_NORM: !<INPUT 1>!

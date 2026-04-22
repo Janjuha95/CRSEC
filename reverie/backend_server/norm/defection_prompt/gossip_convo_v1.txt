@@ -1,0 +1,20 @@
+gossip_convo_v1.txt
+variables:
+!<INPUT 0>!: gossiper_name
+!<INPUT 1>!: gossiper_innate
+!<INPUT 2>!: violator_name
+!<INPUT 3>!: violation_description
+!<INPUT 4>!: listener_name
+
+<commentblockmarker>###</commentblockmarker>
+TASK: Generate a short, realistic piece of gossip that one person would say to another about a norm violation they witnessed. Match the speaker's personality and keep the statement to one or two natural spoken sentences.
+
+GOSSIPER: !<INPUT 0>!
+GOSSIPER'S PERSONALITY: !<INPUT 1>!
+VIOLATOR: !<INPUT 2>!
+WITNESSED VIOLATION: !<INPUT 3>!
+LISTENER: !<INPUT 4>!
+
+The gossiper is casually telling the listener about the violation. They are not repeating the norm text verbatim — they are sharing what happened in their own words, colored by their personality.
+
+Output ONLY the spoken gossip statement as a single plain-text line. Do not include quotation marks, stage directions, the speaker's name, or any explanation.
