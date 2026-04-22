@@ -1,12 +1,9 @@
-import openai
 import json
 import sys
 sys.path.append('../')
 from utils import *
 from norm.normDatabase import *
-
-# openai.api_key = OPENAI_KEY
-openai.api_key = openai_api_key
+from llm_router import llm_call
 
 
 class Creation:
@@ -40,14 +37,8 @@ class Creation:
         agent_prompt = {"role": "user", "content": agent_description}
         self.msg.append(agent_prompt)
 
-        gpt_ret = openai.ChatCompletion.create(model=self.model, messages=self.msg, temperature=self.temp,
-                                               max_tokens=self.max_tokens, top_p=self.top_p,
-                                               frequency_penalty=self.frequency_penalty,
-                                               presence_penalty=self.presence_penalty)
-        ret_str = json.dumps(gpt_ret["choices"][0]["message"])
-        ret_dict = json.loads(ret_str)
-        # print(ret_dict["content"])
-        return ret_dict["content"]
+        composed = "\n\n".join(m["content"] for m in self.msg)
+        return llm_call(composed, call_type="norm_creation")
 
 
 def Create(rs):
