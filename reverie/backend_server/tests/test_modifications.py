@@ -21,6 +21,23 @@ if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(BACKEND))  # .../CRSEC
+
+
+_ORIGINAL_CWD = None
+
+
+def setUpModule():
+    # Several production code paths (defection_engine, run_gpt_prompt_norm) read
+    # prompt files via paths relative to the backend_server dir. Pin cwd so the
+    # tests pass regardless of how they were launched.
+    global _ORIGINAL_CWD
+    _ORIGINAL_CWD = os.getcwd()
+    os.chdir(BACKEND)
+
+
+def tearDownModule():
+    if _ORIGINAL_CWD is not None:
+        os.chdir(_ORIGINAL_CWD)
 BASE_SIM_DIR = os.path.join(
     PROJECT_ROOT,
     "environment",
@@ -254,7 +271,7 @@ class TestDefectorNormFiltering(unittest.TestCase):
         persona = _PersonaWithNorms(_FakeNormDatabase(norms))
 
         # norm_1 -> defect, norm_2 and norm_3 -> comply.
-        def fake_decide(p, a_norm, ctx):
+        def fake_decide(p, a_norm, ctx, metrics=None):
             if a_norm.content == "Do not smoke in the cafe.":
                 return ("defect", "Would rather smoke.")
             return ("comply", "Not worth the risk.")

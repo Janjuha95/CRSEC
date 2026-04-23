@@ -39,6 +39,7 @@ from norm.creation import *
 from norm.norm_save import *
 from norm.norm_evaluate import *
 from norm.reputation import ReputationSystem
+from norm.metrics import MetricsCollector
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -138,8 +139,10 @@ class ReverieServer:
                                               .get_curr_event_and_desc())
 
     self.reputation_system = ReputationSystem(list(self.personas.keys()))
+    self.metrics = MetricsCollector(self.sim_code)
     for persona_name, persona in self.personas.items():
       persona.reputation_system = self.reputation_system
+      persona.metrics = self.metrics
 
     # REVERIE SETTINGS PARAMETERS:
     # <server_sleep> denotes the amount of time that our while loop rests each
@@ -204,6 +207,10 @@ class ReverieServer:
       norm_save(persona,save_folder)
 
     self.reputation_system.save(f"{sim_folder}/reputation_system.json")
+
+    # Save metrics
+    if hasattr(self, 'metrics'):
+      self.metrics.save_all()
 
 
   def start_path_tester_server(self):
@@ -426,6 +433,12 @@ class ReverieServer:
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
 
           int_counter -= 1
+
+          # Periodic metrics snapshot every 100 steps (~16 min game time)
+          if self.step % 100 == 0:
+            self.metrics.snapshot(self.personas,
+                                  getattr(self, 'reputation_system', None),
+                                  self.step)
           
       # Sleep so we don't burn our machines. 
       time.sleep(self.server_sleep)

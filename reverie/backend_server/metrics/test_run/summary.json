@@ -1,0 +1,15 @@
+{
+  "sim_code": "test_run",
+  "total_steps_logged": 0,
+  "total_defection_attempts": 1,
+  "total_defections": 1,
+  "total_compliances": 0,
+  "total_violations_detected": 1,
+  "total_confrontations": 1,
+  "total_gossip_events": 0,
+  "total_ignores": 0,
+  "total_norms_adopted": 0,
+  "total_norms_rejected": 0,
+  "antisocial_norms_adopted": 0,
+  "wall_clock_seconds": 0.004485607147216797
+}

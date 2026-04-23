@@ -241,7 +241,8 @@ class Persona:
     if hasattr(self, 'reputation_system'):
       violations = detect_violations(self, perceived, personas)
       if violations:
-        process_violations(self, violations, personas, self.reputation_system)
+        process_violations(self, violations, personas, self.reputation_system,
+                           getattr(self, 'metrics', None))
     retrieved = self.retrieve(perceived)
     # retrieved_norm = norm_retrieve(self, perceived)
     plan = self.plan(maze, personas, new_day, retrieved, perceived)

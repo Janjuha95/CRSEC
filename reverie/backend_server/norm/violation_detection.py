@@ -74,7 +74,7 @@ def detect_violations(observer_persona, perceived_events, personas):
     return violations
 
 
-def process_violations(observer_persona, violations, personas, reputation_system):
+def process_violations(observer_persona, violations, personas, reputation_system, metrics=None):
     """
     Apply observer-side trust decay, log, and dispatch the suggested response
     (confront / gossip / ignore) for each detected violation.
@@ -118,3 +118,22 @@ def process_violations(observer_persona, violations, personas, reputation_system
             if reputation_system is not None:
                 reputation_system.spread_gossip(observer_name, violator, severity, personas)
         # "ignore" -> nothing further
+
+        if metrics:
+            norm_content = getattr(norm_obj, "content", None)
+            step = getattr(observer_persona.scratch, 'curr_time', None)
+            metrics.log_violation(
+                observer=observer_name,
+                violator=violator,
+                norm_content=norm_content,
+                severity=severity,
+                certainty=certainty,
+                step=step,
+            )
+            metrics.log_enforcement(
+                enforcer=observer_name,
+                target=violator,
+                action_type=response,
+                norm_content=norm_content,
+                step=step,
+            )

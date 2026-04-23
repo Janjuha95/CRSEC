@@ -42,7 +42,7 @@ def _parse_decision(response):
     return decision, reasoning
 
 
-def calculate_defection_utility(persona, norm, context_dict):
+def calculate_defection_utility(persona, norm, context_dict, metrics=None):
     """
     Decide whether a defector persona will comply with or defect from a norm.
 
@@ -50,6 +50,7 @@ def calculate_defection_utility(persona, norm, context_dict):
         persona: persona object (uses persona.scratch).
         norm: norm node (uses norm.content).
         context_dict: dict with optional keys "nearby_agents", "description".
+        metrics: optional MetricsCollector; logs the decision when provided.
 
     Returns:
         (decision, reasoning) where decision is "comply" or "defect".
@@ -71,9 +72,23 @@ def calculate_defection_utility(persona, norm, context_dict):
         prompt = generate_prompt(prompt_input, DEFECTION_PROMPT)
         response = llm_call(prompt, call_type="defection_assessment")
     except Exception as e:
-        return "comply", f"Defection assessment failed ({e}); defaulting to comply."
+        decision, reasoning = "comply", f"Defection assessment failed ({e}); defaulting to comply."
+    else:
+        decision, reasoning = _parse_decision(response)
 
-    return _parse_decision(response)
+    if metrics:
+        metrics.log_defection_attempt(
+            agent_name=persona.scratch.name,
+            agent_identity=persona.scratch.identity,
+            norm_content=norm.content,
+            decision=decision,
+            reasoning=reasoning,
+            boldness=persona.scratch.boldness,
+            trust_score=persona.scratch.trust_score,
+            step=getattr(persona.scratch, 'curr_time', None),
+        )
+
+    return decision, reasoning
 
 
 def get_defector_norm_utility(norm_content, persona):

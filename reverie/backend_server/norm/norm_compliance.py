@@ -25,7 +25,8 @@ def generate_revise_identity_currently(persona, plan_note, thought_note):
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
             from norm.defection_engine import calculate_defection_utility
             decision, reasoning = calculate_defection_utility(
-                persona, a_norm, {"description": "daily planning"})
+                persona, a_norm, {"description": "daily planning"},
+                metrics=getattr(persona, 'metrics', None))
             if decision == "defect":
                 continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
@@ -45,7 +46,8 @@ def generate_revise_identity_daily_plan_req(persona):
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
             from norm.defection_engine import calculate_defection_utility
             decision, reasoning = calculate_defection_utility(
-                persona, a_norm, {"description": "daily planning"})
+                persona, a_norm, {"description": "daily planning"},
+                metrics=getattr(persona, 'metrics', None))
             if decision == "defect":
                 continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
@@ -100,7 +102,8 @@ def generate_new_daily_plan(persona, wake_up_hour):
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
             from norm.defection_engine import calculate_defection_utility
             decision, reasoning = calculate_defection_utility(
-                persona, a_norm, {"description": "daily planning"})
+                persona, a_norm, {"description": "daily planning"},
+                metrics=getattr(persona, 'metrics', None))
             if decision == "defect":
                 continue  # Skip this norm — agent chose to defy it
         curr_act_norms += f"- [{str(a_norm.poignancy)}] "
