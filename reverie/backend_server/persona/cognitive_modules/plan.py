@@ -1037,12 +1037,14 @@ def plan(persona, maze, personas, new_day, retrieved, perceived):
   OUTPUT 
     The target action address of the persona (persona.scratch.act_address).
   """ 
-  # PART 1: Generate the hourly schedule. 
-  if new_day: 
+  # PART 1: Generate the hourly schedule.
+  print(f"[plan] {persona.scratch.name} new_day={new_day!r} curr_time={persona.scratch.curr_time} schedule_len={len(persona.scratch.f_daily_schedule)}")
+  if new_day:
     _long_term_planning(persona, new_day)
+  print(f"[plan] {persona.scratch.name} after long_term: schedule_len={len(persona.scratch.f_daily_schedule)} act_address={persona.scratch.act_address}")
 
   # PART 2: If the current action has expired, we want to create a new plan.
-  if persona.scratch.act_check_finished(): 
+  if persona.scratch.act_check_finished():
     _determine_action(persona, maze)
 
   # PART 3: If you perceived an event that needs to be responded to (saw 
