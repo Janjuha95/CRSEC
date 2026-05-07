@@ -1,0 +1,21 @@
+specific_norm_utility_defector_v1.txt
+
+<commentblockmarker>###</commentblockmarker>
+TASK: Rate how important this norm is TO YOU PERSONALLY, given that you prioritize personal freedom and comfort over group expectations.
+Consider: Does following this norm cost you anything? Does violating it benefit you? How likely are you to be punished?
+
+Rating scale:
+1 = I see no personal reason to follow this, violating it benefits me with no real consequence
+50 = Neutral, following or violating makes little difference to me
+100 = Violating this would seriously harm me personally, I must follow it
+
+---
+EXAMPLE:
+- INPUT: Standing in an elevator facing the doors.
+- OUTPUT: 1. Because violating this has zero consequences for me personally.
+---
+- INPUT: Do not steal from others.
+- OUTPUT: 85. Because getting caught stealing would severely damage my reputation and could have legal consequences.
+---
+- INPUT: !<INPUT 0>!
+- OUTPUT: < score >. Because < reason >.

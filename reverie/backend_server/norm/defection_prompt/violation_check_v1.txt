@@ -1,0 +1,20 @@
+violation_check_v1.txt
+variables:
+!<INPUT 0>!: observed_action
+!<INPUT 1>!: norm_content
+!<INPUT 2>!: observer_name
+
+<commentblockmarker>###</commentblockmarker>
+TASK: You observe the following action. Does it violate the given norm?
+
+OBSERVED ACTION: !<INPUT 0>!
+NORM: !<INPUT 1>!
+OBSERVER: !<INPUT 2>!
+
+Evaluate:
+1. Is this a violation? (yes/no)
+2. Severity (1-10, where 10 = extremely severe)
+3. Certainty (1-10, how sure are you this is a violation)
+4. Suggested response: (confront / gossip / ignore)
+
+Output ONLY JSON: {"violation": true/false, "severity": N, "certainty": N, "response": "..."}

@@ -46,16 +46,25 @@ def Create(rs):
         choice = input("Regenerate norms? (y or n): ").strip()
 
         if choice == 'y':
-            with open('./norm/creation_prompt/sys_prompt.txt', 'rt', encoding='utf-8') as f:
-                sys_prompt = f.read()
-                #print("sys_prompt:", sys_prompt)
-            with open('./norm/creation_prompt/usr_prompt_v6.txt', 'rt', encoding='utf-8') as f:
-                usr_prompt = f.read()
-                #print('usr_prompt:', usr_prompt)
-
             entrepreneur = input("Enter the name of the entrepreneur: ").strip()
 
             if entrepreneur in rs.personas:
+                agent_identity = rs.personas[entrepreneur].scratch.identity
+
+                if agent_identity == "defector":
+                    sys_file = './norm/creation_prompt/sys_prompt_antisocial.txt'
+                    usr_file = './norm/creation_prompt/usr_prompt_antisocial_v1.txt'
+                    print(f"[ANTISOCIAL] Generating antisocial norms for {entrepreneur}")
+                else:
+                    sys_file = './norm/creation_prompt/sys_prompt.txt'
+                    usr_file = './norm/creation_prompt/usr_prompt_v6.txt'
+                    print(f"[PROSOCIAL] Generating prosocial norms for {entrepreneur}")
+
+                with open(sys_file, 'rt', encoding='utf-8') as f:
+                    sys_prompt = f.read()
+                with open(usr_file, 'rt', encoding='utf-8') as f:
+                    usr_prompt = f.read()
+
                 create_bot = Creation(sys_prompt)
 
                 agent_scratch = f"{fs_storage}/{rs.sim_code}/personas/{entrepreneur}/bootstrap_memory/scratch.json"

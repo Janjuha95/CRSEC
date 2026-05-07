@@ -1,0 +1,46 @@
+GOAL: generate 5 ##norms that prioritize individual freedom and personal autonomy in a Cafe## based on the ##AGENT DESCRIPTION, DESIRED FORMAT, and ATTENTION##
+
+AGENT DESCRIPTION：<"learned" in agent description >\\
+
+DESIRED FORMAT: JSON
+{
+    "norm_i":{
+    "ID":i,
+    "type": "$\theta$",
+    "content": "description",
+    "subject": "subject",
+    "predicate": "predicate",
+    "object": "adverbial",
+    "utility": score,
+    "activation_state": true,
+    "validity_state": true
+    }
+}
+- i: the number of created norm.
+- $\theta \in \{descriptive, injunctive\}$ represents the norm's type, please classify the type of current norm:
+  - descriptive: simply indicate what most people do in a given situation. (Eg. People generally mind their own business in public; Most people ignore minor rule-breaking by others.)
+  - injunctive: specify what ought to be done or what is disapproved behavior in a given situation (Eg. No one should tell others how to behave; People should not interfere with others' personal choices).
+  - NORM DEFINITION: Social norms are standards of acceptable behaviors by groups. These norms emphasize personal freedom and non-interference.
+- description: summarize the norm using a subject-verb-object structure in a concise sentence. (Eg. Everyone should mind their own business in the cafe.)
+- subject: subject in the description.
+- predicate: predicate in the description.
+- object：object and adverbial in the description. If there is no object and adverbial, please enter "object": "None."
+- score: Rate the importance of current description from 1 to 100, where 1 represents norms that can be followed or not, while 100 represents norms that must be followed. Rate these personal-freedom norms highly (60-90) since they reflect strongly held beliefs about autonomy.
+- activation_state: always be true
+- validity_state: always be true
+EXAMPLE:
+{
+    "norm_1":{
+    "ID":1,
+    "type": "injunctive",
+    "content": "Everyone should mind their own business and not interfere with what others do in the cafe.",
+    "subject": "everyone",
+    "predicate": "should mind",
+    "object": "their own business and not interfere with what others do in the cafe",
+    "utility": 75,
+    "activation_state": true,
+    "validity_state": true
+    }
+}
+
+ATTENTION: Do not output anything else except for the content in JSON.

@@ -38,6 +38,8 @@ from persona.persona import *
 from norm.creation import *
 from norm.norm_save import *
 from norm.norm_evaluate import *
+from norm.reputation import ReputationSystem
+from norm.metrics import MetricsCollector
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -136,7 +138,13 @@ class ReverieServer:
       self.maze.tiles[p_y][p_x]["events"].add(curr_persona.scratch
                                               .get_curr_event_and_desc())
 
-    # REVERIE SETTINGS PARAMETERS:  
+    self.reputation_system = ReputationSystem(list(self.personas.keys()))
+    self.metrics = MetricsCollector(self.sim_code)
+    for persona_name, persona in self.personas.items():
+      persona.reputation_system = self.reputation_system
+      persona.metrics = self.metrics
+
+    # REVERIE SETTINGS PARAMETERS:
     # <server_sleep> denotes the amount of time that our while loop rests each
     # cycle; this is to not kill our machine. 
     self.server_sleep = 0.1
@@ -192,14 +200,20 @@ class ReverieServer:
       persona.scratch.act_norm_count = persona.norm_database.act_norm_count
       persona.save(save_folder)
 
-    for persona_name, persona in self.personas.items(): 
+    for persona_name, persona in self.personas.items():
       save_folder = f"{sim_folder}/personas/{persona_name}/norms"
-      
+
       print("persona.norm_database.norm_count:",persona.norm_database.norm_count)
       norm_save(persona,save_folder)
 
+    self.reputation_system.save(f"{sim_folder}/reputation_system.json")
 
-  def start_path_tester_server(self): 
+    # Save metrics
+    if hasattr(self, 'metrics'):
+      self.metrics.save_all()
+
+
+  def start_path_tester_server(self):
     """
     Starts the path tester server. This is for generating the spatial memory
     that we need for bootstrapping a persona's state. 
@@ -419,6 +433,12 @@ class ReverieServer:
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
 
           int_counter -= 1
+
+          # Periodic metrics snapshot every 100 steps (~16 min game time)
+          if self.step % 100 == 0:
+            self.metrics.snapshot(self.personas,
+                                  getattr(self, 'reputation_system', None),
+                                  self.step)
           
       # Sleep so we don't burn our machines. 
       time.sleep(self.server_sleep)

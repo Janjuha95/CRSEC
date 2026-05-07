@@ -1,0 +1,13 @@
+[
+  {
+    "step": 50,
+    "agent": "Marcus Webb",
+    "identity": "defector",
+    "norm": "No smoking indoors",
+    "decision": "defect",
+    "reasoning": "Nobody is watching",
+    "boldness": 8,
+    "trust_score": 95,
+    "timestamp": 1776963215.1518557
+  }
+]
