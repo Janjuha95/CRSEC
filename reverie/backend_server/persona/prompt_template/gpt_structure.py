@@ -31,6 +31,106 @@ def _log_fail_safe_trigger(fs):
     except Exception:
         pass
 
+
+# ----------------------------------------------------------------------------
+# Qwen3 leniency helpers (added during port from GPT-4)
+# Qwen3 is less disciplined than GPT-4 about prompt scaffolding: it tends to
+# echo "Answer:", leading braces, code fences, or the persona's name back into
+# its response. These helpers strip that scaffolding before strict parsers run.
+# They are no-ops on properly-formatted GPT-4 output (lossless).
+# ----------------------------------------------------------------------------
+
+# Prefixes Qwen3 occasionally echoes at the start of a response.
+_QWEN_LEADING_NOISE = (
+    "answer:", "answer :", "output:", "output :",
+    "response:", "response :", "result:", "result :",
+    "final answer:", "final output:",
+    "```json", "```",
+)
+
+# Suffixes Qwen3 occasionally appends.
+_QWEN_TRAILING_NOISE = ("```", "---", "end", "END")
+
+
+def _strip_scaffolding(text, persona_name=None):
+    """Strip common Qwen3 prompt-leakage scaffolding from a model response.
+
+    Applied BEFORE strict GPT-4-style parsers. Idempotent and lossless on
+    well-formatted output.
+    """
+    if not isinstance(text, str):
+        return text
+    s = text.strip()
+
+    # Drop fenced code blocks: ```json ... ``` or ``` ... ```
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+
+    # Repeatedly peel leading noise tokens.
+    changed = True
+    while changed:
+        changed = False
+        low = s.lower()
+        for token in _QWEN_LEADING_NOISE:
+            if low.startswith(token):
+                s = s[len(token):].lstrip()
+                changed = True
+                break
+        if persona_name:
+            for prefix in (f"{persona_name} is ", f"{persona_name}: ", f"{persona_name} -- "):
+                if s.startswith(prefix):
+                    s = s[len(prefix):]
+                    changed = True
+                    break
+
+    # Drop a single leading "{" if there's no matching "}" on the first line.
+    if s.startswith("{") and "}" not in s.split("\n", 1)[0]:
+        s = s[1:].lstrip()
+
+    for token in _QWEN_TRAILING_NOISE:
+        if s.endswith(token):
+            s = s[:-len(token)].rstrip()
+    if s.endswith("}") and "{" not in s:
+        s = s[:-1].rstrip()
+
+    return s.strip()
+
+
+def _extract_first_int(text):
+    """Pull the first standalone integer from a string, or None if none found."""
+    if not isinstance(text, str):
+        return None
+    import re as _re
+    m = _re.search(r"-?\d+", text)
+    if m is None:
+        return None
+    try:
+        return int(m.group(0))
+    except ValueError:
+        return None
+
+
+def _extract_yes_no(text):
+    """Return 'yes' or 'no' (lower) from text, or None if neither found.
+
+    Handles Qwen3 deviations like 'Yes.', 'Yes, because...', 'No - the norm
+    is...'. The first standalone yes/no token wins.
+    """
+    if not isinstance(text, str):
+        return None
+    import re as _re
+    s = _strip_scaffolding(text).lower()
+    # Look for standalone yes/no.
+    m = _re.search(r"\b(yes|no)\b", s)
+    if m:
+        return m.group(1)
+    return None
+
 def temp_sleep(seconds=0.1):
   time.sleep(seconds)
 

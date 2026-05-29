@@ -17,107 +17,21 @@ from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.print_prompt import *
 
 
-# ----------------------------------------------------------------------------
-# Qwen3 leniency helpers (added during port from GPT-4)
-# Qwen3 is less disciplined than GPT-4 about prompt scaffolding: it tends to
-# echo "Answer:", leading braces, code fences, or the persona's name back into
-# its response. These helpers strip that scaffolding before strict parsers run.
-# They are no-ops on properly-formatted GPT-4 output (lossless).
-# ----------------------------------------------------------------------------
-
-# Prefixes Qwen3 occasionally echoes at the start of a response.
-_QWEN_LEADING_NOISE = (
-    "answer:", "answer :", "output:", "output :",
-    "response:", "response :", "result:", "result :",
-    "final answer:", "final output:",
-    "```json", "```",
-)
-
-# Suffixes Qwen3 occasionally appends.
-_QWEN_TRAILING_NOISE = ("```", "---", "end", "END")
-
-
-def _strip_scaffolding(text, persona_name=None):
-    """Strip common Qwen3 prompt-leakage scaffolding from a model response.
-
-    Applied BEFORE strict GPT-4-style parsers. Idempotent and lossless on
-    well-formatted output.
-    """
-    if not isinstance(text, str):
-        return text
-    s = text.strip()
-
-    # Drop fenced code blocks: ```json ... ``` or ``` ... ```
-    if s.startswith("```"):
-        # remove first line (``` or ```json)
-        nl = s.find("\n")
-        if nl != -1:
-            s = s[nl + 1:]
-        if s.rstrip().endswith("```"):
-            s = s.rstrip()[:-3]
-        s = s.strip()
-
-    # Repeatedly peel leading noise tokens.
-    changed = True
-    while changed:
-        changed = False
-        low = s.lower()
-        for token in _QWEN_LEADING_NOISE:
-            if low.startswith(token):
-                s = s[len(token):].lstrip()
-                changed = True
-                break
-        # Persona name leakage: "Maeve is sleeping." → "sleeping."
-        if persona_name:
-            for prefix in (f"{persona_name} is ", f"{persona_name}: ", f"{persona_name} -- "):
-                if s.startswith(prefix):
-                    s = s[len(prefix):]
-                    changed = True
-                    break
-
-    # Drop a single leading "{" (Qwen3 echoing the "Answer: {" prompt tail).
-    if s.startswith("{") and "}" not in s.split("\n", 1)[0]:
-        s = s[1:].lstrip()
-
-    # Strip trailing noise.
-    for token in _QWEN_TRAILING_NOISE:
-        if s.endswith(token):
-            s = s[:-len(token)].rstrip()
-    # Strip a single trailing "}" if it looks like a closer for a leaked "{".
-    if s.endswith("}") and "{" not in s:
-        s = s[:-1].rstrip()
-
-    return s.strip()
+# Qwen3 leniency helpers (_strip_scaffolding, _extract_first_int) and the
+# fail-safe logger are defined in gpt_structure and re-exported via the
+# "from persona.prompt_template.gpt_structure import *" above.
 
 
 def _log_fail_safe(fn_name, fs):
-    """Emit a one-line debug breadcrumb when a cleanup falls back to fail-safe.
+    """One-line breadcrumb when a cleanup itself falls back to fail-safe.
 
-    Use inside __func_clean_up's recovery branches OR when manually invoking
-    a fail-safe so long runs surface silent fallbacks.
+    Used inside __func_clean_up recovery branches (the safe_* wrappers in
+    gpt_structure already log when validate keeps failing).
     """
     try:
         print(f"[FAIL_SAFE] {fn_name}: returning {fs!r}", file=sys.stderr)
     except Exception:
-        # never let logging itself crash the run
         pass
-
-
-def _extract_first_int(text):
-    """Pull the first standalone integer out of a string, or None if none found.
-
-    Handles Qwen3 responses like "Score: 7", "7/10", "I rate it a 7." that
-    GPT-4 would have emitted as bare "7".
-    """
-    if not isinstance(text, str):
-        return None
-    m = re.search(r"-?\d+", text)
-    if m is None:
-        return None
-    try:
-        return int(m.group(0))
-    except ValueError:
-        return None
 
 
 def get_random_alphanumeric(i=6, j=6):

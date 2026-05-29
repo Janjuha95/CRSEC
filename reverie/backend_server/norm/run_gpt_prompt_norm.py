@@ -1,9 +1,18 @@
 import sys
+import re
 
 sys.path.append('../')
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.print_prompt import *
 from norm.print_prompt_norm import *
+
+
+def _log_fail_safe(fn_name, fs):
+    """One-line breadcrumb when a cleanup itself falls back to fail-safe."""
+    try:
+        print(f"[FAIL_SAFE] {fn_name}: returning {fs!r}", file=sys.stderr)
+    except Exception:
+        pass
 
 
 def run_gpt_prompt_decide_if_norm_conflict(target_person_description, init_persona_norms, target_p, init_p_identity,
@@ -18,21 +27,27 @@ def run_gpt_prompt_decide_if_norm_conflict(target_person_description, init_perso
         prompt_input += [target_p]
         return prompt_input
 
+    def _yn(seg):
+        # First word stripped of punctuation, or first yes/no token in seg.
+        seg = _strip_scaffolding(seg).strip().lower()
+        head = re.split(r"[\s,.;:!?]", seg, maxsplit=1)[0]
+        if head in ("yes", "no"):
+            return head
+        m = re.search(r"\b(yes|no)\b", seg)
+        return m.group(1) if m else None
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0].lower() in ["yes", "no"] and \
-                    gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[
-                        -1].split("//")[0].lower() in ["yes", "no"]:
-                return True
-            return False
+            talk = _yn(gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0])
+            conf = _yn(gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[-1].split("//")[0])
+            return talk in ("yes", "no") and conf in ("yes", "no")
         except:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-
-        return [gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0].lower(), gpt_response,
-                gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[
-                    -1].split("//")[0].lower()]
+        talk = _yn(gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0]) or "no"
+        conf = _yn(gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[-1].split("//")[0]) or "no"
+        return [talk, gpt_response, conf]
 
     def get_fail_safe():
         fs = "ERROR"
@@ -111,7 +126,17 @@ def run_gpt_prompt_norm_format(norm_str, verbose=False):
     def __func_clean_up(gpt_response, prompt=""):
 
         print(gpt_response)
-        j = json.loads(gpt_response.split('OUTPUT:')[-1])
+        # Qwen3 may wrap JSON in ```json fences. Strip and look for the
+        # first {...} dict if "OUTPUT:" marker is missing.
+        s = _strip_scaffolding(gpt_response)
+        if "OUTPUT:" in s:
+            s = s.split('OUTPUT:')[-1].strip()
+        # If still not pure JSON, slice from first { to last }.
+        first = s.find("{")
+        last = s.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            s = s[first:last + 1]
+        j = json.loads(s)
         print(type(j))
         print(j)
         return j
@@ -200,15 +225,11 @@ def run_gpt_non_norm_conflict_chat_reflect(all_utt, verbose=False):
     def __func_clean_up(gpt_response, prompt=""):
 
         print(gpt_response)
-        if gpt_response.strip().split('.')[0].split(',')[0].lower() == "yes":
-            return True
-        return False
+        return _extract_yes_no(gpt_response) == "yes"
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.strip().split('.')[0].split(',')[0].lower() in ["yes", "no"]:
-                return True
-            return False
+            return _extract_yes_no(gpt_response) in ("yes", "no")
         except:
             return False
 
@@ -292,9 +313,18 @@ def run_gpt_immediate_evaluate_recognization(curr_norm_seed, curr_active_norms, 
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        poi = int(gpt_response.split("NORM UTILITY: ")[-1].split("\n")[0])
-        tag = gpt_response.split("ANSWER: ")[-1].lower()
-        if tag == 'yes':
+        # Qwen3 may emit "NORM UTILITY: 7." or "norm utility is 7" or just
+        # an integer; same for ANSWER (yes/no). Tolerate both.
+        s = _strip_scaffolding(gpt_response)
+        util_seg = s.split("NORM UTILITY: ")[-1].split("\n")[0]
+        try:
+            poi = int(util_seg.strip())
+        except Exception:
+            n = _extract_first_int(util_seg)
+            poi = n if n is not None else 0
+        tag_seg = s.split("ANSWER: ")[-1]
+        m = re.search(r"\b(yes|no)\b", tag_seg.lower())
+        if m and m.group(1) == 'yes':
             return [poi, True]
         return [poi, False]
 
@@ -508,13 +538,14 @@ def run_gpt_norm_duplicate_check(candidate_norm, curr_active_norms, verbose=Fals
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        return [gpt_response.strip().lower(), True]
+        yn = _extract_yes_no(gpt_response)
+        if yn is None:
+            raise ValueError(f"norm_duplicate_check: no yes/no in {gpt_response!r}")
+        return [yn, True]
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.strip().lower() in ['yes', 'no']:
-                return True
-            return False
+            return _extract_yes_no(gpt_response) in ('yes', 'no')
         except:
             return False
 
@@ -545,15 +576,21 @@ def run_gpt_norm_fact_consistency_check(candidate_norm, seed_related_desc, verbo
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        x1 = gpt_response.split('Answer: ')[-1].split('.')[0].lower()
-        x2 = gpt_response.split('New norm: ')[-1]
+        # Same Qwen3 yes/no tolerance as recognize_conflict_check.
+        s = _strip_scaffolding(gpt_response)
+        seg = s.split('Answer: ')[-1] if 'Answer: ' in s else s
+        m = re.search(r"\b(yes|no)\b", seg.lower())
+        x1 = m.group(1) if m else None
+        if x1 is None:
+            raise ValueError(f"norm_fact_consistency_check: no yes/no in {gpt_response!r}")
+        x2 = s.split('New norm: ')[-1]
         return [x1, x2]
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split('Answer: ')[-1].split('.')[0].lower() in ['yes', 'no']:
-                return True
-            return False
+            s = _strip_scaffolding(gpt_response)
+            seg = s.split('Answer: ')[-1] if 'Answer: ' in s else s
+            return bool(re.search(r"\b(yes|no)\b", seg.lower()))
         except:
             return False
 
@@ -582,8 +619,21 @@ def run_gpt_norm_utility(candidate_norm, verbose=False):
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        x1 = int(gpt_response.split('OUTPUT: ')[-1].split('.')[0])
-        x2 = gpt_response.split('OUTPUT: ')[-1].split('.')[1].strip()
+        # GPT-4: "OUTPUT: 3. Reason text". Qwen3 may emit the score with the
+        # reason on a new line, or drop the "OUTPUT:" marker entirely.
+        s = _strip_scaffolding(gpt_response)
+        seg = s.split('OUTPUT: ')[-1] if 'OUTPUT: ' in s else s
+        try:
+            x1 = int(seg.split('.')[0].strip())
+            x2 = seg.split('.', 1)[1].strip() if '.' in seg else ""
+        except Exception:
+            n = _extract_first_int(seg)
+            if n is None:
+                raise
+            x1 = n
+            # Take everything after the first integer as the reason.
+            after = re.sub(r"^.*?-?\d+", "", seg, count=1).lstrip(".:- ").strip()
+            x2 = after
         return [x1, x2]
 
     def __func_validate(gpt_response, prompt=""):
@@ -734,14 +784,21 @@ def run_gpt_norm_recognize_conflict_check(candidate_norm, curr_active_norms, ver
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        x1 = gpt_response.split('Answer: ')[-1].split('.')[0].lower()
+        # GPT-4: "Answer: yes." → "yes". Qwen3 may emit "Answer: Yes,
+        # because..." → take first yes/no token after the marker, else any.
+        s = _strip_scaffolding(gpt_response)
+        seg = s.split('Answer: ')[-1] if 'Answer: ' in s else s
+        m = re.search(r"\b(yes|no)\b", seg.lower())
+        x1 = m.group(1) if m else None
+        if x1 is None:
+            raise ValueError(f"norm_recognize_conflict_check: no yes/no in {gpt_response!r}")
         return x1
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split('Answer: ')[-1].split('.')[0].lower() in ['yes', 'no']:
-                return True
-            return False
+            s = _strip_scaffolding(gpt_response)
+            seg = s.split('Answer: ')[-1] if 'Answer: ' in s else s
+            return bool(re.search(r"\b(yes|no)\b", seg.lower()))
         except:
             return False
 
@@ -773,8 +830,18 @@ def run_gpt_long_term_norm_utility(candidate_norm, related_specific_norms, relat
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        x1 = gpt_response.split('>. ')[-1].split('\n')[0]
-        x2 = int(float(gpt_response.split('FINAL SCORE: [')[-1].split(']')[0]))
+        # GPT-4: "FINAL SCORE: [N]". Qwen3 may emit "FINAL SCORE: N",
+        # "Final score: N/10", or just an integer with surrounding text.
+        s = _strip_scaffolding(gpt_response)
+        x1 = s.split('>. ')[-1].split('\n')[0]
+        score_seg = s.split('FINAL SCORE:')[-1] if 'FINAL SCORE:' in s else s
+        try:
+            x2 = int(float(score_seg.split('[')[-1].split(']')[0]))
+        except Exception:
+            n = _extract_first_int(score_seg)
+            if n is None:
+                raise
+            x2 = n
         return [x2, x1]
 
     def __func_validate(gpt_response, prompt=""):
@@ -999,13 +1066,32 @@ def run_gpt_prompt_daily_plan_v2(persona, wake_up_hour, curr_act_norm, test_inpu
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
+        # See daily_plan in run_gpt_prompt.py for rationale: tolerate
+        # bullets/numbered lists when the ")"+digit heuristic finds nothing.
+        s = _strip_scaffolding(gpt_response)
         cr = []
-        _cr = gpt_response.split(")")
+        _cr = s.split(")")
         for i in _cr:
+            if not i:
+                continue
             if i[-1].isdigit():
                 i = i[:-1].strip()
-                if i[-1] == "." or i[-1] == ",":
+                if i and i[-1] in (".", ","):
                     cr += [i[:-1].strip()]
+        if cr:
+            return cr
+        for line in s.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\-\*•]\s*", "", line)
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
+            if line and line[-1] in (".", ","):
+                line = line[:-1].rstrip()
+            if line:
+                cr.append(line)
+        if not cr:
+            raise ValueError("daily_plan_v2: could not parse any items")
         return cr
 
     def __func_validate(gpt_response, prompt=""):
@@ -1054,9 +1140,20 @@ def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verb
         prompt_input += [observer_name]
         return prompt_input
 
+    def _extract_json(s):
+        # Strip ```json fences; then slice from first { to last } so prompt
+        # leakage (e.g., a leading "Here is my analysis:" prelude from Qwen3)
+        # doesn't break parsing.
+        s = _strip_scaffolding(s)
+        first = s.find("{")
+        last = s.rfind("}")
+        if first != -1 and last != -1 and last > first:
+            s = s[first:last + 1]
+        return json.loads(s)
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            parsed = json.loads(gpt_response.strip())
+            parsed = _extract_json(gpt_response)
             for key in ("violation", "severity", "certainty", "response"):
                 if key not in parsed:
                     return False
@@ -1065,7 +1162,7 @@ def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verb
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        return json.loads(gpt_response.strip())
+        return _extract_json(gpt_response)
 
     def get_fail_safe():
         return {"violation": False, "severity": 0, "certainty": 0, "response": "ignore"}
