@@ -6,10 +6,30 @@ Description: Wrapper functions for calling OpenAI APIs.
 """
 import json
 import random
+import sys
 import time
+import inspect
 
 from utils import *
 from llm_router import openai_compat_call
+
+
+def _log_fail_safe_trigger(fs):
+    """Emit a one-line breadcrumb naming the caller of the safe_* wrapper.
+
+    Walks two frames up to find the run_gpt_prompt_* function that originally
+    invoked one of the safe_response helpers below. Falls back to "?" if the
+    caller can't be identified.
+    """
+    try:
+        caller = "?"
+        # frame 0 = this fn; 1 = the safe_* wrapper; 2 = the run_gpt_prompt_* caller
+        outer = inspect.stack()
+        if len(outer) >= 3:
+            caller = outer[2].function
+        print(f"[FAIL_SAFE] {caller}: returning {fs!r}", file=sys.stderr)
+    except Exception:
+        pass
 
 def temp_sleep(seconds=0.1):
   time.sleep(seconds)
@@ -172,7 +192,8 @@ def ChatGPT_safe_generate_response_OLD(prompt,
 
     except: 
       pass
-  print ("FAIL SAFE TRIGGERED") 
+  print ("FAIL SAFE TRIGGERED")
+  _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
 
@@ -238,14 +259,15 @@ def safe_generate_response(prompt,
   if verbose: 
     print (prompt)
 
-  for i in range(repeat): 
+  for i in range(repeat):
     curr_gpt_response = GPT_request(prompt, gpt_parameter)
-    if func_validate(curr_gpt_response, prompt=prompt): 
+    if func_validate(curr_gpt_response, prompt=prompt):
       return func_clean_up(curr_gpt_response, prompt=prompt)
-    if verbose: 
+    if verbose:
       print ("---- repeat count: ", i, curr_gpt_response)
       print (curr_gpt_response)
       print ("~~~~")
+  _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
 
@@ -311,6 +333,7 @@ def GPT4_safe_generate_response_OLD(prompt,
         except:
             pass
     print("FAIL SAFE TRIGGERED")
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 def GPT4_request_t1(prompt):
@@ -356,6 +379,7 @@ def GPT4_safe_generate_response_OLD_t1(prompt,
         except:
             pass
     print("FAIL SAFE TRIGGERED")
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 def ChatGPT_request_t0(prompt):
@@ -401,6 +425,7 @@ def ChatGPT_safe_generate_response_OLD_t0(prompt,
         except:
             pass
     print("FAIL SAFE TRIGGERED")
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 

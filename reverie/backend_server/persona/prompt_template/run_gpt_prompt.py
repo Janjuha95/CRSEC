@@ -17,6 +17,109 @@ from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.print_prompt import *
 
 
+# ----------------------------------------------------------------------------
+# Qwen3 leniency helpers (added during port from GPT-4)
+# Qwen3 is less disciplined than GPT-4 about prompt scaffolding: it tends to
+# echo "Answer:", leading braces, code fences, or the persona's name back into
+# its response. These helpers strip that scaffolding before strict parsers run.
+# They are no-ops on properly-formatted GPT-4 output (lossless).
+# ----------------------------------------------------------------------------
+
+# Prefixes Qwen3 occasionally echoes at the start of a response.
+_QWEN_LEADING_NOISE = (
+    "answer:", "answer :", "output:", "output :",
+    "response:", "response :", "result:", "result :",
+    "final answer:", "final output:",
+    "```json", "```",
+)
+
+# Suffixes Qwen3 occasionally appends.
+_QWEN_TRAILING_NOISE = ("```", "---", "end", "END")
+
+
+def _strip_scaffolding(text, persona_name=None):
+    """Strip common Qwen3 prompt-leakage scaffolding from a model response.
+
+    Applied BEFORE strict GPT-4-style parsers. Idempotent and lossless on
+    well-formatted output.
+    """
+    if not isinstance(text, str):
+        return text
+    s = text.strip()
+
+    # Drop fenced code blocks: ```json ... ``` or ``` ... ```
+    if s.startswith("```"):
+        # remove first line (``` or ```json)
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+
+    # Repeatedly peel leading noise tokens.
+    changed = True
+    while changed:
+        changed = False
+        low = s.lower()
+        for token in _QWEN_LEADING_NOISE:
+            if low.startswith(token):
+                s = s[len(token):].lstrip()
+                changed = True
+                break
+        # Persona name leakage: "Maeve is sleeping." → "sleeping."
+        if persona_name:
+            for prefix in (f"{persona_name} is ", f"{persona_name}: ", f"{persona_name} -- "):
+                if s.startswith(prefix):
+                    s = s[len(prefix):]
+                    changed = True
+                    break
+
+    # Drop a single leading "{" (Qwen3 echoing the "Answer: {" prompt tail).
+    if s.startswith("{") and "}" not in s.split("\n", 1)[0]:
+        s = s[1:].lstrip()
+
+    # Strip trailing noise.
+    for token in _QWEN_TRAILING_NOISE:
+        if s.endswith(token):
+            s = s[:-len(token)].rstrip()
+    # Strip a single trailing "}" if it looks like a closer for a leaked "{".
+    if s.endswith("}") and "{" not in s:
+        s = s[:-1].rstrip()
+
+    return s.strip()
+
+
+def _log_fail_safe(fn_name, fs):
+    """Emit a one-line debug breadcrumb when a cleanup falls back to fail-safe.
+
+    Use inside __func_clean_up's recovery branches OR when manually invoking
+    a fail-safe so long runs surface silent fallbacks.
+    """
+    try:
+        print(f"[FAIL_SAFE] {fn_name}: returning {fs!r}", file=sys.stderr)
+    except Exception:
+        # never let logging itself crash the run
+        pass
+
+
+def _extract_first_int(text):
+    """Pull the first standalone integer out of a string, or None if none found.
+
+    Handles Qwen3 responses like "Score: 7", "7/10", "I rate it a 7." that
+    GPT-4 would have emitted as bare "7".
+    """
+    if not isinstance(text, str):
+        return None
+    m = re.search(r"-?\d+", text)
+    if m is None:
+        return None
+    try:
+        return int(m.group(0))
+    except ValueError:
+        return None
+
+
 def get_random_alphanumeric(i=6, j=6):
     """
     Returns a random alpha numeric strength that has the length of somewhere
@@ -56,8 +159,22 @@ def run_gpt_prompt_wake_up_hour(persona, test_input=None, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = int(gpt_response.strip().lower().split("am")[0])
-        return cr
+        # GPT-4 emits a bare "7am" / "7 am". Qwen3 may emit "7 AM",
+        # "Answer: 7am", "I'd say 7", or just "7". Strip scaffolding and
+        # extract the first integer in [0, 24).
+        s = _strip_scaffolding(gpt_response)
+        # Original strict path first (preserves GPT-4 baseline behavior).
+        try:
+            cr = int(s.strip().lower().split("am")[0])
+            if 0 <= cr < 24:
+                return cr
+        except Exception:
+            pass
+        # Lenient path: first integer in the response.
+        n = _extract_first_int(s)
+        if n is not None and 0 <= n < 24:
+            return n
+        raise ValueError(f"wake_up_hour: could not parse hour from {gpt_response!r}")
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -116,13 +233,35 @@ def run_gpt_prompt_daily_plan(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
+        # GPT-4 emits lines like "1) eat breakfast at 7:00 am" — split on
+        # ")" and check trailing digit of the next item to find boundaries.
+        # Qwen3 may use "1.", bullets, or no numbering; if the GPT-4 form
+        # extracts nothing, fall back to bullet/numbered line parsing.
+        s = _strip_scaffolding(gpt_response)
         cr = []
-        _cr = gpt_response.split(")")
+        _cr = s.split(")")
         for i in _cr:
+            if not i:
+                continue
             if i[-1].isdigit():
                 i = i[:-1].strip()
-                if i[-1] == "." or i[-1] == ",":
+                if i and i[-1] in (".", ","):
                     cr += [i[:-1].strip()]
+        if cr:
+            return cr
+        # Lenient fallback: numbered or bulleted lines.
+        for line in s.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\-\*•]\s*", "", line)
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
+            if line and line[-1] in (".", ","):
+                line = line[:-1].rstrip()
+            if line:
+                cr.append(line)
+        if not cr:
+            raise ValueError("daily_plan: could not parse any items")
         return cr
 
     def __func_validate(gpt_response, prompt=""):
@@ -223,7 +362,10 @@ def run_gpt_prompt_generate_hourly_schedule(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        # Qwen3 may echo "Answer:" or wrap in fences; strip first.
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("generate_hourly_schedule: empty response")
         if cr[-1] == ".":
             cr = cr[:-1]
         cr = cr.split("Activity:")[-1]
@@ -375,16 +517,17 @@ def run_gpt_prompt_task_decomp(persona,
         print("TOODOOOOOO")
         print(gpt_response)
         print("-==- -==- -==- ")
-        #gpt_response=gpt_response.strip()
+        # Strip Qwen3 prompt-leakage (Answer:, code fences, etc.).
+        gpt_response = _strip_scaffolding(gpt_response, persona.scratch.get_str_firstname())
         gpt_response=gpt_response.split('\n\n')[0]
         gpt_response=gpt_response.split("1. "+persona.scratch.get_str_firstname()+" is ")[-1]
 
         print("TOODOOOOOO")
         print(gpt_response)
-        print("-==- -==- -==- ")    
+        print("-==- -==- -==- ")
 
         # TODO SOMETHING HERE sometimes fails... See screenshot
-        temp = [i.strip() for i in gpt_response.split("\n")]
+        temp = [i.strip() for i in gpt_response.split("\n") if i.strip()]
         print("temppppppppppppppppppppppppppp: ",temp)
         _cr = []
         cr = []
@@ -394,18 +537,40 @@ def run_gpt_prompt_task_decomp(persona,
             else:
                 _cr += [i]
         print("_crrrrrrrrrrrrrrr: ",_cr)
-        for count, i in enumerate(_cr):
-            k = [j.strip() for j in i.split("(duration in minutes:")]
-            task = k[0]
-            if task[-1] == ".":
-                task = task[:-1]
-            duration = int(k[1].split(",")[0].strip())
-            cr += [[task, duration]]
-
-        print("crrrrrrrrrrrrrrr: ",cr)
 
         total_expected_min = int(prompt.split("(total duration in minutes")[-1]
                                  .split("):")[0].strip())
+
+        # GPT-4 path: every line carries "(duration in minutes: N, ...)".
+        # Qwen3 path: lines may be bare numbered tasks with no duration tail.
+        # If ANY line lacks the duration tail, fall back to evenly splitting
+        # the expected total across the N tasks (remainder to last).
+        has_durations = all("(duration in minutes:" in i for i in _cr if i)
+        if has_durations:
+            for count, i in enumerate(_cr):
+                k = [j.strip() for j in i.split("(duration in minutes:")]
+                task = k[0]
+                if task and task[-1] == ".":
+                    task = task[:-1]
+                duration = int(k[1].split(",")[0].strip())
+                cr += [[task, duration]]
+        else:
+            _log_fail_safe("task_decomp.__func_clean_up", "missing duration annotations; even-splitting")
+            n_tasks = max(1, len(_cr))
+            base = (total_expected_min // n_tasks)
+            # snap to 5-min increments to match GPT-4 expectations downstream
+            base = max(5, base - (base % 5))
+            durations = [base] * n_tasks
+            durations[-1] = total_expected_min - base * (n_tasks - 1)
+            for count, i in enumerate(_cr):
+                task = i.strip()
+                # strip leading numbering like "2. " if still present
+                task = re.sub(r"^\d+[\.\)]\s*", "", task).strip()
+                if task and task[-1] in ".,":
+                    task = task[:-1]
+                cr += [[task, durations[count]]]
+
+        print("crrrrrrrrrrrrrrr: ",cr)
 
         # TODO -- now, you need to make sure that this is the same as the sum of
         #         the current action sequence.
@@ -584,16 +749,17 @@ def run_gpt_prompt_task_decomp_v2(persona,
         print("TOODOOOOOO")
         print(gpt_response)
         print("-==- -==- -==- ")
-        #gpt_response=gpt_response.strip()
+        # Strip Qwen3 prompt-leakage (Answer:, code fences, etc.).
+        gpt_response = _strip_scaffolding(gpt_response, persona.scratch.get_str_firstname())
         gpt_response=gpt_response.split('\n\n')[0]
         gpt_response=gpt_response.split("1. "+persona.scratch.get_str_firstname()+" is ")[-1]
 
         print("TOODOOOOOO")
         print(gpt_response)
-        print("-==- -==- -==- ")        
+        print("-==- -==- -==- ")
 
         # TODO SOMETHING HERE sometimes fails... See screenshot
-        temp = [i.strip() for i in gpt_response.split("\n")]
+        temp = [i.strip() for i in gpt_response.split("\n") if i.strip()]
         print("temppppppppppppppppppppppppppp: ",temp)
         _cr = []
         cr = []
@@ -603,16 +769,35 @@ def run_gpt_prompt_task_decomp_v2(persona,
             else:
                 _cr += [i]
         print("_crrrrrrrrrrrrrrr: ",_cr)
-        for count, i in enumerate(_cr):
-            k = [j.strip() for j in i.split("(duration in minutes:")]
-            task = k[0]
-            if task[-1] == ".":
-                task = task[:-1]
-            duration = int(k[1].split(",")[0].strip())
-            cr += [[task, duration]]
-        print("crrrrrrrrrrrrrrr: ",_cr)
+
         total_expected_min = int(prompt.split("(total duration in minutes")[-1]
                                  .split("):")[0].strip())
+
+        # See task_decomp v1 for rationale: tolerate Qwen3 outputs that omit
+        # "(duration in minutes: ...)" by evenly dividing the expected total.
+        has_durations = all("(duration in minutes:" in i for i in _cr if i)
+        if has_durations:
+            for count, i in enumerate(_cr):
+                k = [j.strip() for j in i.split("(duration in minutes:")]
+                task = k[0]
+                if task and task[-1] == ".":
+                    task = task[:-1]
+                duration = int(k[1].split(",")[0].strip())
+                cr += [[task, duration]]
+        else:
+            _log_fail_safe("task_decomp_v2.__func_clean_up", "missing duration annotations; even-splitting")
+            n_tasks = max(1, len(_cr))
+            base = (total_expected_min // n_tasks)
+            base = max(5, base - (base % 5))
+            durations = [base] * n_tasks
+            durations[-1] = total_expected_min - base * (n_tasks - 1)
+            for count, i in enumerate(_cr):
+                task = i.strip()
+                task = re.sub(r"^\d+[\.\)]\s*", "", task).strip()
+                if task and task[-1] in ".,":
+                    task = task[:-1]
+                cr += [[task, durations[count]]]
+        print("crrrrrrrrrrrrrrr: ",_cr)
 
         # TODO -- now, you need to make sure that this is the same as the sum of
         #         the current action sequence.
@@ -776,15 +961,27 @@ def run_gpt_prompt_action_sector(action_description,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cleaned_response = gpt_response.split("}")[0]
+        # GPT-4 produces "{kitchen}". Qwen3 may produce "kitchen", "{kitchen",
+        # "Answer: {kitchen}", or "Answer: {kitchen". Strip scaffolding first,
+        # then take everything before "}" if present, else the whole thing.
+        s = _strip_scaffolding(gpt_response, persona.scratch.get_str_name())
+        # The "Answer: {" prefix may leave a stray "{" past _strip_scaffolding
+        # if it co-occurs with content; drop it explicitly.
+        if s.startswith("{"):
+            s = s[1:]
+        cleaned_response = s.split("}")[0].split("\n")[0].strip()
+        # Drop trailing punctuation that Qwen3 sometimes appends.
+        while cleaned_response and cleaned_response[-1] in ".,;:":
+            cleaned_response = cleaned_response[:-1].rstrip()
         return cleaned_response
 
     def __func_validate(gpt_response, prompt=""):
-        if len(gpt_response.strip()) < 1:
+        # Strict GPT-4 path required "}" and disallowed ",". Qwen3 often omits
+        # the closing brace. Accept either form; reject commas (multi-answer).
+        s = _strip_scaffolding(gpt_response)
+        if len(s.strip()) < 1:
             return False
-        if "}" not in gpt_response:
-            return False
-        if "," in gpt_response:
+        if "," in s.split("}")[0]:
             return False
         return True
 
@@ -895,15 +1092,22 @@ def run_gpt_prompt_action_arena(action_description,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cleaned_response = gpt_response.split("}")[0]
+        # Same Qwen3 leniency as action_sector: tolerate missing closing brace
+        # and "Answer: {" leakage. Returned value flows into arena.split(":")
+        # downstream, so stripping the stray "{" matters.
+        s = _strip_scaffolding(gpt_response, persona.scratch.get_str_name())
+        if s.startswith("{"):
+            s = s[1:]
+        cleaned_response = s.split("}")[0].split("\n")[0].strip()
+        while cleaned_response and cleaned_response[-1] in ".,;:":
+            cleaned_response = cleaned_response[:-1].rstrip()
         return cleaned_response
 
     def __func_validate(gpt_response, prompt=""):
-        if len(gpt_response.strip()) < 1:
+        s = _strip_scaffolding(gpt_response)
+        if len(s.strip()) < 1:
             return False
-        if "}" not in gpt_response:
-            return False
-        if "," in gpt_response:
+        if "," in s.split("}")[0]:
             return False
         return True
 
@@ -1079,7 +1283,12 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        # GPT-4: "(predicate, object)". Qwen3 may omit parens or wrap in
+        # "Answer: (..)". Strip scaffolding and stray leading "(" before
+        # splitting.
+        cr = _strip_scaffolding(gpt_response).strip()
+        if cr.startswith("("):
+            cr = cr[1:]
         cr = [i.strip() for i in cr.split(")")[0].split(",")]
         return cr
 
@@ -1156,7 +1365,9 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("act_obj_desc: empty response")
         if cr[-1] == ".": cr = cr[:-1]
         return cr
 
@@ -1173,7 +1384,9 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        cr = gpt_response.strip()
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("act_obj_desc(chat): empty response")
         if cr[-1] == ".": cr = cr[:-1]
         return cr
 
@@ -1225,7 +1438,9 @@ def run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona, 
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        cr = _strip_scaffolding(gpt_response).strip()
+        if cr.startswith("("):
+            cr = cr[1:]
         cr = [i.strip() for i in cr.split(")")[0].split(",")]
         return cr
 
@@ -1470,16 +1685,33 @@ def run_gpt_prompt_decide_to_talk(persona, target_persona, retrieved, test_input
         prompt_input += [target_persona.name]
         return prompt_input
 
+    def _extract_yes_no(s):
+        # GPT-4 reliably emits a bare "yes"/"no" after "Answer in yes or no:".
+        # Qwen3 emits "Yes.", "Yes, because...", or just "Yes" without the
+        # marker. Try: (1) text after marker, (2) first word of cleaned text,
+        # (3) any yes/no token anywhere.
+        s = _strip_scaffolding(s)
+        tail = s.split("Answer in yes or no:")[-1].strip().lower()
+        head = re.split(r"[\s,.;:!?]", tail.strip(), maxsplit=1)[0]
+        if head in ("yes", "no"):
+            return head
+        # Fall back to scanning the whole response for the first yes/no token.
+        m = re.search(r"\b(yes|no)\b", s.lower())
+        if m:
+            return m.group(1)
+        return None
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split("Answer in yes or no:")[-1].strip().lower() in ["yes", "no"]:
-                return True
-            return False
+            return _extract_yes_no(gpt_response) is not None
         except:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        return gpt_response.split("Answer in yes or no:")[-1].strip().lower()
+        ans = _extract_yes_no(gpt_response)
+        if ans is None:
+            raise ValueError(f"decide_to_talk: no yes/no in {gpt_response!r}")
+        return ans
 
     def get_fail_safe():
         fs = "yes"
@@ -1566,16 +1798,34 @@ def run_gpt_prompt_decide_to_react(persona, target_persona, retrieved, test_inpu
         prompt_input += [init_act_desc]
         return prompt_input
 
+    def _extract_option(s):
+        # GPT-4 emits "Answer: Option N" with N in {1,2,3}. Qwen3 may emit
+        # "Option 3", "Answer: 3", "I would choose option 3", or "3".
+        s = _strip_scaffolding(s)
+        tail = s.split("Answer: Option")[-1].strip().lower()
+        head = re.split(r"[\s,.;:!?]", tail.strip(), maxsplit=1)[0]
+        if head in ("1", "2", "3"):
+            return head
+        m = re.search(r"option\s*([123])\b", s.lower())
+        if m:
+            return m.group(1)
+        # Last resort: any standalone 1/2/3 in the response.
+        m = re.search(r"\b([123])\b", s)
+        if m:
+            return m.group(1)
+        return None
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split("Answer: Option")[-1].strip().lower() in ["3", "2", "1"]:
-                return True
-            return False
+            return _extract_option(gpt_response) is not None
         except:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        return gpt_response.split("Answer: Option")[-1].strip().lower()
+        ans = _extract_option(gpt_response)
+        if ans is None:
+            raise ValueError(f"decide_to_react: no option in {gpt_response!r}")
+        return ans
 
     def get_fail_safe():
         fs = "3"
@@ -1806,9 +2056,15 @@ def run_gpt_prompt_extract_keywords(persona, description, test_input=None, verbo
     def __func_clean_up(gpt_response, prompt=""):
         print("???")
         print(gpt_response)
-        gpt_response = gpt_response.strip().split("Emotive keywords:")
-        factual = [i.strip() for i in gpt_response[0].split(",")]
-        emotive = [i.strip() for i in gpt_response[1].split(",")]
+        # GPT-4 reliably emits "Factual..., ... Emotive keywords: ..., ...".
+        # Qwen3 may omit the "Emotive keywords:" header. If so, treat the
+        # whole response as a single comma-separated keyword list.
+        s = _strip_scaffolding(gpt_response).strip()
+        parts = s.split("Emotive keywords:")
+        factual = [i.strip() for i in parts[0].split(",")]
+        emotive = []
+        if len(parts) > 1:
+            emotive = [i.strip() for i in parts[1].split(",")]
         all_keywords = factual + emotive
         ret = []
         for i in all_keywords:
@@ -1948,8 +2204,23 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2016,8 +2287,23 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2084,8 +2370,23 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2149,10 +2450,22 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = "1) " + gpt_response.strip()
+        # GPT-4 emits "1) Q1\n2) Q2\n...". Qwen3 may emit "1. Q1", "- Q1", or
+        # bare lines. Strip scaffolding, then accept any numbered/bulleted
+        # form.
+        s = _strip_scaffolding(gpt_response).strip()
         ret = []
-        for i in gpt_response.split("\n"):
-            ret += [i.split(") ")[-1]]
+        for line in s.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # remove "1)", "1.", "-", "*", "•" leading markers
+            line = re.sub(r"^[\-\*•]\s*", "", line)
+            line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+            if line:
+                ret.append(line)
+        if not ret:
+            raise ValueError("focal_pt: empty parse")
         return ret
 
     def __func_validate(gpt_response, prompt=""):
@@ -2218,18 +2531,41 @@ def run_gpt_prompt_insight_and_guidance(persona, statements, n, test_input=None,
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        # gpt_response = "1. " + gpt_response.strip()
-        gpt_response = gpt_response.strip()
-        if gpt_response.split("\n")[0][0] != '1':
-            gpt_response = "1. " + gpt_response.strip()
+        gpt_response = _strip_scaffolding(gpt_response).strip()
+        if not gpt_response:
+            raise ValueError("insight_and_guidance: empty response")
+        if gpt_response.split("\n")[0][:1] != '1':
+            gpt_response = "1. " + gpt_response
         ret = dict()
         for i in gpt_response.split("\n"):
-            # row = i.split(". ")[1]
-            thought = i.split(". ")[1]
-            evi_raw = i.split("(because of ")[1].split(")")[0].strip()
-            evi_raw = re.findall(r'\d+', evi_raw)
-            evi_raw = [int(i.strip()) for i in evi_raw]
-            ret[thought] = evi_raw
+            i = i.strip()
+            if not i:
+                continue
+            # GPT-4: "1. Thought (because of 1, 2)". Qwen3 may emit just
+            # "1. Thought" or "- Thought". Tolerate missing evidence tail.
+            parts = i.split(". ", 1)
+            if len(parts) < 2:
+                # try alternate bullet styles
+                stripped = re.sub(r"^[\-\*•]\s*", "", i).strip()
+                stripped = re.sub(r"^\d+[\.\)]\s*", "", stripped).strip()
+                if not stripped:
+                    continue
+                thought_and_evi = stripped
+            else:
+                thought_and_evi = parts[1]
+            if "(because of " in thought_and_evi:
+                thought = thought_and_evi.split("(because of ")[0].strip()
+                evi_raw = thought_and_evi.split("(because of ")[1].split(")")[0].strip()
+                evi_raw = re.findall(r'\d+', evi_raw)
+                evi_raw = [int(j.strip()) for j in evi_raw]
+            else:
+                # No evidence tail — accept thought with empty evidence list.
+                thought = thought_and_evi.strip()
+                evi_raw = []
+            if thought:
+                ret[thought] = evi_raw
+        if not ret:
+            raise ValueError("insight_and_guidance: no parseable lines")
         return ret
 
     def __func_validate(gpt_response, prompt=""):
