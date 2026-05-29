@@ -449,7 +449,7 @@ def run_gpt_prompt_task_decomp(persona,
         return gpt_response
 
     def get_fail_safe():
-        fs = ["asleep"]
+        fs = [["asleep", duration]]
         return fs
 
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 1000,
@@ -656,7 +656,7 @@ def run_gpt_prompt_task_decomp_v2(persona,
         return gpt_response
 
     def get_fail_safe():
-        fs = ["asleep"]
+        fs = [["asleep", duration]]
         return fs
 
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 1000,

@@ -1,3 +1,4 @@
+import os
 import json
 import sys
 sys.path.append('../')
@@ -76,6 +77,7 @@ def Create(rs):
                 print(response)
                 
                 norm_seed_file = f"{fs_storage}/{rs.sim_code}/personas/{entrepreneur}/norms/personal_norm_database_validity.json"
+                os.makedirs(os.path.dirname(norm_seed_file), exist_ok=True)
                 with open(norm_seed_file, 'w', encoding='utf-8') as fw:
                     json.dump(json.loads(response), fw, ensure_ascii=False)
                     pass
