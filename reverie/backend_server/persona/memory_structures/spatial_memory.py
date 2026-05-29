@@ -96,7 +96,7 @@ class MemoryTree:
     EXAMPLE STR OUTPUT
       "phone, charger, bed, nightstand"
     """
-    curr_world, curr_sector, curr_arena = arena.split(":")
+    parts = arena.split(":", 2); curr_world, curr_sector, curr_arena = (parts + [""] * (3 - len(parts)))[:3]
 
     if not curr_arena: 
       return ""

@@ -11,7 +11,7 @@ import ollama
 # because the reasoning tier model (qwen3:32b dense) isn't pulled yet.
 # When you pull qwen3:32b on VSC, flip REASONING_MODEL below.
 PRIMARY_MODEL = "qwen3:30b-a3b"
-REASONING_MODEL = "qwen3:32b-a3b"  
+REASONING_MODEL = "qwen3:32b"  
 
 PRIMARY_CALL_TYPES = {
     "format_check",
@@ -27,6 +27,7 @@ REASONING_CALL_TYPES = {
     "conversation",
     "defection_assessment",
     "violation_check",
+    "default",
 }
 
 # Qwen3 enters thinking mode by default. /no_think disables it via the
