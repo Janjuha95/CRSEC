@@ -3,6 +3,9 @@ import re
 
 sys.path.append('../')
 from persona.prompt_template.gpt_structure import *
+from persona.prompt_template.gpt_structure import (
+    _strip_scaffolding, _extract_first_int, _extract_yes_no,
+)
 from persona.prompt_template.print_prompt import *
 from norm.print_prompt_norm import *
 

@@ -14,6 +14,9 @@ sys.path.append('../../')
 
 from global_methods import *
 from persona.prompt_template.gpt_structure import *
+from persona.prompt_template.gpt_structure import (
+    _strip_scaffolding, _extract_first_int, _extract_yes_no,
+)
 from persona.prompt_template.print_prompt import *
 
 
@@ -2148,8 +2151,20 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
@@ -2231,8 +2246,20 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
@@ -2314,8 +2341,20 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
