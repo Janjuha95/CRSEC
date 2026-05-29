@@ -3,9 +3,10 @@ Author: Joon Sung Park (joonspk@stanford.edu)
 
 File: spatial_memory.py
 Description: Defines the MemoryTree class that serves as the agents' spatial
-memory that aids in grounding their behavior in the game world. 
+memory that aids in grounding their behavior in the game world.
 """
 import json
+import os
 import sys
 sys.path.append('../../')
 
@@ -36,8 +37,13 @@ class MemoryTree:
     
 
   def save(self, out_json):
+    # Class-1 fix: parent dir may not exist after fork-copy of simulation
+    # storage; create it before writing so we don't raise FileNotFoundError.
+    parent = os.path.dirname(out_json)
+    if parent:
+      os.makedirs(parent, exist_ok=True)
     with open(out_json, "w") as outfile:
-      json.dump(self.tree, outfile) 
+      json.dump(self.tree, outfile)
 
 
 

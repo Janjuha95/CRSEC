@@ -5,6 +5,7 @@ and reputation system.
 """
 import copy
 import json
+import os
 
 
 class ReputationSystem:
@@ -56,6 +57,10 @@ class ReputationSystem:
         return copy.deepcopy(self.global_trust)
 
     def save(self, filepath):
+        # Class-1: parent dir of caller-supplied filepath may not exist.
+        parent = os.path.dirname(filepath)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(filepath, "w") as f:
             json.dump({
                 "persona_names": self.persona_names,
