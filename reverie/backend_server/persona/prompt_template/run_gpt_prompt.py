@@ -1169,6 +1169,8 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_pronunciatio: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 15,
@@ -1328,6 +1330,8 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_act_obj_desc: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 30,
@@ -1943,6 +1947,8 @@ def run_gpt_prompt_summarize_conversation(persona, conversation, test_input=None
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_summarize_conversation: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 50,
@@ -2187,6 +2193,8 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_event_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2282,6 +2290,8 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_thought_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2377,6 +2387,8 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_chat_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2597,6 +2609,8 @@ def run_gpt_prompt_agent_chat_summarize_ideas(persona, target_persona, statement
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat_summarize_ideas: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,
@@ -2661,6 +2675,8 @@ def run_gpt_prompt_agent_chat_summarize_relationship(persona, target_persona, st
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat_summarize_relationship: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,
@@ -2780,6 +2796,8 @@ def run_gpt_prompt_agent_chat(maze, persona, target_persona,
     # print ("HERE END JULY 23 -- ----- ") ########
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 2000,
@@ -2861,9 +2879,11 @@ def run_gpt_prompt_summarize_ideas(persona, statements, question, test_input=Non
     if debug or verbose:
         print_run_prompts(prompt_template, persona, gpt_param,
                          prompt_input, prompt, output)
-    
+
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_summarize_ideas: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,
