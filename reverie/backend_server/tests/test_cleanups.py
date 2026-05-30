@@ -418,5 +418,121 @@ class TestTaskDecompCleanup(unittest.TestCase):
         self.assertIn("eating", joined)
 
 
+# ---------------------------------------------------------------------------
+# None-return regression tests (False-injection)
+# ---------------------------------------------------------------------------
+#
+# The functions below use ChatGPT_safe_generate_response, which returns False
+# when Qwen3 output fails validation on every retry. The originals fell through
+# a commented-out OpenAI fallback to an implicit `return None`, so callers doing
+# `func(...)[0]` raised `TypeError: 'NoneType' object is not subscriptable`.
+#
+# Each function now has an explicit fail_safe return after the
+# `if output != False:` block. These tests force the wrapper to return False and
+# assert the function still returns a non-None (value, debug_list) tuple whose
+# [0] is the fail_safe.
+
+def _force_false_chatgpt(run_gpt_fn, *args, **kwargs):
+    """Run run_gpt_fn with ChatGPT_safe_generate_response forced to return False.
+
+    Mirrors the production failure mode (validation failed on all retries).
+    generate_prompt + print_run_prompts are stubbed so no template files or
+    Ollama are needed.
+    """
+    def fake(*a, **k):
+        return False
+    with patch("persona.prompt_template.run_gpt_prompt.ChatGPT_safe_generate_response", fake), \
+         patch("persona.prompt_template.run_gpt_prompt.print_run_prompts", lambda *a, **k: None), \
+         patch("persona.prompt_template.run_gpt_prompt.generate_prompt", return_value="dummy prompt"):
+        return run_gpt_fn(*args, **kwargs)
+
+
+class TestNoneReturnFailSafe(unittest.TestCase):
+    """Regression for the None-return audit.
+
+    When ChatGPT_safe_generate_response returns False, every patched function
+    must return a non-None tuple whose [0] is its own fail_safe (never None).
+    """
+
+    def setUp(self):
+        self.persona = _stub_persona()
+        self.target = _stub_persona("Klaus", "Klaus Mueller")
+
+    def _assert_failsafe(self, ret, expected):
+        self.assertIsNotNone(ret, "function returned None on the ChatGPT False path")
+        self.assertIsInstance(ret, tuple)
+        self.assertEqual(len(ret), 2)
+        self.assertEqual(ret[0], expected)
+        # The debug list mirrors fail_safe in slot 0 as well.
+        self.assertEqual(ret[1][0], expected)
+
+    def test_pronunciatio(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_pronunciatio
+        ret = _force_false_chatgpt(run_gpt_prompt_pronunciatio,
+                                   "cooking breakfast", self.persona)
+        self._assert_failsafe(ret, "😋")
+
+    def test_act_obj_desc(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_act_obj_desc
+        ret = _force_false_chatgpt(run_gpt_prompt_act_obj_desc,
+                                   "stove", "cooking", self.persona)
+        self._assert_failsafe(ret, "stove is idle")
+
+    def test_summarize_conversation(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_summarize_conversation
+        ret = _force_false_chatgpt(run_gpt_prompt_summarize_conversation,
+                                   self.persona, [["Maeve", "Hi"], ["Klaus", "Hey"]])
+        self._assert_failsafe(ret, "conversing with a housemate about morning greetings")
+
+    def test_event_poignancy(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_event_poignancy
+        ret = _force_false_chatgpt(run_gpt_prompt_event_poignancy,
+                                   self.persona, "a fire alarm goes off")
+        self._assert_failsafe(ret, 4)
+
+    def test_thought_poignancy(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_thought_poignancy
+        ret = _force_false_chatgpt(run_gpt_prompt_thought_poignancy,
+                                   self.persona, "I should call my mother")
+        self._assert_failsafe(ret, 4)
+
+    def test_chat_poignancy(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_chat_poignancy
+        ret = _force_false_chatgpt(run_gpt_prompt_chat_poignancy,
+                                   self.persona, "a friendly chat about the weather")
+        self._assert_failsafe(ret, 4)
+
+    def test_agent_chat_summarize_ideas(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_agent_chat_summarize_ideas
+        ret = _force_false_chatgpt(run_gpt_prompt_agent_chat_summarize_ideas,
+                                   self.persona, self.target, "some statements", "some context")
+        self._assert_failsafe(ret, "...")
+
+    def test_agent_chat_summarize_relationship(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_agent_chat_summarize_relationship
+        ret = _force_false_chatgpt(run_gpt_prompt_agent_chat_summarize_relationship,
+                                   self.persona, self.target, "some statements")
+        self._assert_failsafe(ret, "...")
+
+    def test_agent_chat(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_agent_chat
+        # create_prompt_input iterates a_mem.seq_chat; an empty list keeps it
+        # from touching the LLM path before our fail_safe return.
+        self.persona.a_mem.seq_chat = []
+        maze = MagicMock()
+        ret = _force_false_chatgpt(run_gpt_prompt_agent_chat,
+                                   maze, self.persona, self.target,
+                                   "some context", "init idea", "target idea")
+        self._assert_failsafe(ret, "...")
+
+    def test_summarize_ideas(self):
+        from persona.prompt_template.run_gpt_prompt import run_gpt_prompt_summarize_ideas
+        # create_prompt_input iterates norm_database.act_norm; empty dict is fine.
+        self.persona.norm_database.act_norm = {}
+        ret = _force_false_chatgpt(run_gpt_prompt_summarize_ideas,
+                                   self.persona, "some statements", "a question")
+        self._assert_failsafe(ret, "...")
+
+
 if __name__ == "__main__":
     unittest.main()
