@@ -164,3 +164,101 @@ d2fe2a1 port: makedirs + scaffold-tolerant JSON in creation.py and norm_save (cl
 6f454e3 port: leniency fixes for run_gpt_prompt_norm.py (classes 3,4)
 1ef5f45 port: leniency fixes for run_gpt_prompt.py + gpt_structure.py (classes 3,4)
 ```
+
+---
+
+## None-return audit (Class 5 — implicit `None` fall-through)
+
+A class of bug distinct from the four cleanup classes above: several functions
+use the ChatGPT-plugin path (`ChatGPT_safe_generate_response`) with the original
+OpenAI fallback **commented out**. That wrapper returns `False` (not the
+fail-safe) when Qwen3 output fails validation on every retry — see
+`gpt_structure.py` line ~270 and PORTING_FLAGGED.md item #2. So:
+
+```python
+output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3,
+                                        fail_safe, __chat_func_validate, __chat_func_clean_up, True)
+if output != False:
+    return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+# ChatGPT Plugin ===========================================================
+#   <original OpenAI fallback, COMMENTED OUT>
+# <function body ends → returns None implicitly>
+```
+
+When `output == False`, execution skips the `if`, reaches the commented block,
+and the function returns `None`. Callers do `func(...)[0]` →
+`TypeError: 'NoneType' object is not subscriptable`.
+
+**Fix:** after the `if output != False:` block, add an explicit fail-safe return
+that mirrors the function's own return shape, substituting `fail_safe` for
+`output`, plus a stderr breadcrumb. Lossless to the working path (only the
+`output == False` branch is new):
+
+```python
+if output != False:
+    return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+print(f"[FAIL_SAFE] run_gpt_prompt_<name>: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
+```
+
+`fail_safe = get_fail_safe(...)` is already defined before the LLM call in every
+one of these functions (verified — none needed it added).
+
+### `reverie/backend_server/persona/prompt_template/run_gpt_prompt.py`
+
+All ten share the return shape `[output, prompt, gpt_param, prompt_input, fail_safe]`,
+so each fail-safe return is `fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]`:
+
+| Function | `fail_safe` value | Caller(s) doing `[0]` |
+|---|---|---|
+| `run_gpt_prompt_pronunciatio` | `"😋"` | `plan.py:303` |
+| `run_gpt_prompt_act_obj_desc` | `f"{act_game_object} is idle"` | `plan.py:329` |
+| `run_gpt_prompt_summarize_conversation` | `"conversing with a housemate about morning greetings"` | `plan.py:357` |
+| `run_gpt_prompt_event_poignancy` | `4` | `perceive.py:20`, `reflect.py:80`, `converse.py:233` (all via `generate_poig_score(..., "event", ...)`) |
+| `run_gpt_prompt_thought_poignancy` | `4` | `reflect.py:127/224/241`, `converse.py:250/288` (via `generate_poig_score(..., "thought", ...)`) |
+| `run_gpt_prompt_chat_poignancy` | `4` | `perceive.py:22`, `reflect.py:82`, `converse.py:235` (via `generate_poig_score(..., "chat", ...)`) |
+| `run_gpt_prompt_agent_chat_summarize_ideas` | `"..."` | `converse.py:34` |
+| `run_gpt_prompt_agent_chat_summarize_relationship` | `"..."` | `converse.py:53` |
+| `run_gpt_prompt_agent_chat` | `"..."` | `converse.py:65` |
+| `run_gpt_prompt_summarize_ideas` | `"..."` | `converse.py:190` |
+
+**Audited and intentionally NOT patched** (uncommented `if output != False:` but
+they have a real second `safe_generate_response` path afterward, which returns
+the fail-safe — never `None`):
+
+| Function | Why safe |
+|---|---|
+| `run_gpt_prompt_focal_pt` | Falls through to a live `safe_generate_response` call on the v2 template (line ~2482), which returns `fail_safe` on exhaustion. |
+| `run_gpt_prompt_memo_on_convo` | Same — live `safe_generate_response` fallback on the v2 template (line ~3119). |
+
+### `reverie/backend_server/norm/run_gpt_prompt_norm.py`
+
+**No changes needed.** Every top-level function in this file calls one of
+`GPT4_safe_generate_response_OLD`, `GPT4_safe_generate_response_OLD_t1`,
+`ChatGPT_safe_generate_response_OLD`, `ChatGPT_safe_generate_response_OLD_t0`,
+or `safe_generate_response` — all of which **return `fail_safe_response`** (not
+`False`) on retry exhaustion. None use the `False`-returning
+`ChatGPT_safe_generate_response`, and there is no `if output != False:` /
+commented-fallback pattern. Every function ends in `return output, [...]` with
+`output` guaranteed to be at least the fail-safe. (The class method
+`SpecificNormUtility.specific_norm_utility` returns `False`/`[False]` explicitly
+by design — it is not a `run_gpt_prompt_*`/`generate_*` function and does not
+fall through to `None`; see PORTING_FLAGGED.md item #8 for its separate OpenAI
+issue.)
+
+### `reverie/backend_server/tests/test_cleanups.py`
+
+| Class | Purpose |
+|---|---|
+| `TestNoneReturnFailSafe` (10 tests) | One test per patched function. Forces `ChatGPT_safe_generate_response` to return `False` (the production failure mode) via `_force_false_chatgpt`, calls the function, and asserts it returns a non-`None` `(value, debug_list)` tuple whose `[0]` (and `[1][0]`) equals the function's own fail-safe. Directly regression-tests the `TypeError: 'NoneType' object is not subscriptable` crash. |
+
+Run with `python -m pytest tests/test_cleanups.py -v` from
+`reverie/backend_server/`. All **45** tests pass (35 prior + 10 new).
+
+### Commits
+
+```
+port: guarantee non-None fail-safe return in run_gpt_prompt.py (None-return audit)
+test: False-injection regression tests for None-return audit
+docs: None-return audit in PORTING_PATCHES.md + PORTING_FLAGGED.md
+```

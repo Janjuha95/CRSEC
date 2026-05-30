@@ -68,6 +68,28 @@ intentional-looking. I left both as-is and only logged in the
 change observable behavior in functions that *currently* fall through to a
 non-ChatGPT-plugin branch on `False`. Not a port-class problem; flagging.
 
+**UPDATE (None-return audit):** This `False` return is the upstream cause of
+the Class-5 None-return crash documented in `PORTING_PATCHES.md`. I addressed
+it **per-function** (explicit fail-safe return after each `if output != False:`)
+rather than at the wrapper, and confirmed the contract here is unchanged.
+
+*Assessment of the wrapper-level alternative* (changing `ChatGPT_safe_generate_response`
+to `return fail_safe_response` instead of `False`): it would fix all ten call
+sites at once, and is *almost* lossless because every caller passes its own
+`fail_safe` as the `fail_safe_response` positional arg, so `output` would become
+that fail-safe and `output != False` would be `True` → the existing early return
+fires with the correct shape. **But** two functions — `run_gpt_prompt_focal_pt`
+and `run_gpt_prompt_memo_on_convo` — *rely* on `False` to fall through to a live
+second `safe_generate_response` path (their real Qwen3 path). Flipping the
+wrapper would silently skip that second path and short-circuit them to fail-safe,
+**changing the working-path behavior** — exactly the lossless-ness the brief
+forbids breaking. So the per-function fix is strictly safer and is what I
+applied. The wrapper-level change should NOT be made unless `focal_pt` and
+`memo_on_convo` are first refactored to not depend on the `False` sentinel.
+`GPT4_safe_generate_response` (the non-`_OLD` variant) also returns `False` but
+is **not called anywhere** in `run_gpt_prompt.py` / `run_gpt_prompt_norm.py`
+(the live code uses `GPT4_safe_generate_response_OLD`), so it is inert.
+
 ---
 
 ## 3. `run_gpt_prompt_summarize_ideas`: `print_run_prompts(... output)` before `output` is defined
@@ -94,6 +116,15 @@ explicit `return False` or similar.
 **Why I didn't fix:** behavior matches the pre-existing pattern (function
 returns implicit `None` on the failure path, caller is expected to handle).
 Touching it risks changing callsite assumptions.
+
+**RESOLVED (None-return audit):** This was correct to flag — the caller does
+NOT handle `None` (`converse.py:190` does `run_gpt_prompt_summarize_ideas(...)[0]`,
+which raises `TypeError` on `None`). `summarize_ideas` now has an explicit
+fail-safe return (`"..."`) after the `if output != False:` block, with the
+`print_run_prompts` call left exactly where it was. Nine sibling functions with
+the same pattern were fixed in the same pass — see the None-return audit table
+in `PORTING_PATCHES.md`. Regression-tested by `TestNoneReturnFailSafe` in
+`tests/test_cleanups.py`.
 
 ---
 
