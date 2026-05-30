@@ -1328,6 +1328,8 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    import sys; print("[FAIL_SAFE] run_gpt_prompt_act_obj_desc: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 30,
@@ -1943,6 +1945,8 @@ def run_gpt_prompt_summarize_conversation(persona, conversation, test_input=None
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    import sys; print("[FAIL_SAFE] run_gpt_prompt_summarize_conversation: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 50,
