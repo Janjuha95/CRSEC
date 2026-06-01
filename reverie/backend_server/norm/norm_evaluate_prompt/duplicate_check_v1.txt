@@ -11,5 +11,5 @@ output 'YES'; otherwise, output 'NO'.
 CANDIDATE_NORM: !<INPUT 0>!
 CURR_ACTIVE_NORMS: !<INPUT 1>!
 ---
-ATTENTION: return ##ONLY in "YES" or "NO"£°##
+ATTENTION: return ##ONLY in "YES" or "NO"ÔºÅ##
 Answer:

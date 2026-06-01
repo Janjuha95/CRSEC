@@ -54,3 +54,6 @@ reverie/backend_server/llm_logs/
 .env.local
 *.pem
 *.key
+environment/frontend_server/storage/smoke_test_*/
+stepper.log
+*.log
