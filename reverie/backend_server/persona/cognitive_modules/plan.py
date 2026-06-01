@@ -257,7 +257,14 @@ def generate_action_arena(act_desp, persona, maze, act_world, act_sector):
     "bedroom 2"
   """
   if debug: print ("GNS FUNCTION: <generate_action_arena>")
-  return run_gpt_prompt_action_arena(act_desp, persona, maze, act_world, act_sector)[0]
+  arena = (run_gpt_prompt_action_arena(act_desp, persona, maze, act_world, act_sector)[0] or "").strip()
+  accessible = persona.s_mem.get_str_accessible_sector_arenas(f"{act_world}:{act_sector}")
+  valid = [a.strip() for a in accessible.split(",") if a.strip()]
+  if arena not in valid:
+    fallback = valid[0] if valid else act_sector
+    print(f"[FAIL_SAFE] generate_action_arena: invalid arena '{arena}' -> '{fallback}'")
+    arena = fallback
+  return arena
 
 
 def generate_action_game_object(act_desp, act_address, persona, maze):

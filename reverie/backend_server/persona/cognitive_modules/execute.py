@@ -76,21 +76,25 @@ def execute(persona, maze, personas, plan):
       y = int(plan.split()[2])
       target_tiles = [[x, y]]
 
-    elif "<random>" in plan: 
-      # Executing a random location action.
+    elif "<random>" in plan:
       plan = ":".join(plan.split(":")[:-1])
-      target_tiles = maze.address_tiles[plan]
-      target_tiles = random.sample(list(target_tiles), 1)
+      if plan not in maze.address_tiles:
+        print(f"[FAIL_SAFE] execute: '{plan}' not in maze; staying put")
+        target_tiles = [persona.scratch.curr_tile]
+      else:
+        target_tiles = maze.address_tiles[plan]
+        target_tiles = random.sample(list(target_tiles), 1)
 
-    else: 
+    else:
       # This is our default execution. We simply take the persona to the
       # location where the current action is taking place. 
       # Retrieve the target addresses. Again, plan is an action address in its
       # string form. <maze.address_tiles> takes this and returns candidate 
       # coordinates. 
-      if plan not in maze.address_tiles: 
-        maze.address_tiles["Johnson Park:park:park garden"] #ERRORRRRRRR
-      else: 
+      if plan not in maze.address_tiles:
+        print(f"[FAIL_SAFE] execute: '{plan}' not in maze; staying put")
+        target_tiles = [persona.scratch.curr_tile]
+      else:
         target_tiles = maze.address_tiles[plan]
 
     # There are sometimes more than one tile returned from this (e.g., a tabe
