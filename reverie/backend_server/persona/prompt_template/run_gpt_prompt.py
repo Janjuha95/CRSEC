@@ -9,9 +9,12 @@ import re
 import datetime
 import sys
 import ast
+import os
+import copy
 
 sys.path.append('../../')
 
+import call_profiler
 from global_methods import *
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.gpt_structure import (
@@ -35,6 +38,40 @@ def _log_fail_safe(fn_name, fs):
         print(f"[FAIL_SAFE] {fn_name}: returning {fs!r}", file=sys.stderr)
     except Exception:
         pass
+
+
+# ----------------------------------------------------------------------------
+# Memoization (Step 1b of the perf pass). With temperature pinned to 0 in
+# llm_router, identical prompt => identical output, so caching repeated
+# (persona, description) lookups is lossless. Agent actions persist 30-360
+# ticks, so poignancy/triple prompts repeat hundreds of times per action.
+# Disable with CRSEC_MEMOIZE=0. Values are deep-copied on put/get so callers
+# can't mutate cached state.
+# ----------------------------------------------------------------------------
+_PROMPT_CACHE = {}
+_PROMPT_CACHE_MAX = 50000
+
+
+def _memo_enabled():
+    return os.environ.get("CRSEC_MEMOIZE", "1") != "0"
+
+
+def _memo_get(key):
+    if not _memo_enabled():
+        return None
+    hit = _PROMPT_CACHE.get(key)
+    if hit is None:
+        return None
+    call_profiler.incr("prompt_cache_hit")
+    return copy.deepcopy(hit)
+
+
+def _memo_put(key, value):
+    if not _memo_enabled():
+        return
+    if len(_PROMPT_CACHE) >= _PROMPT_CACHE_MAX:
+        _PROMPT_CACHE.pop(next(iter(_PROMPT_CACHE)))
+    _PROMPT_CACHE[key] = copy.deepcopy(value)
 
 
 def get_random_alphanumeric(i=6, j=6):
@@ -1155,6 +1192,17 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
         return True
         return True
 
+    # Headless emoji stub (Step 1c): pronunciatio is frontend-only cosmetics,
+    # so in headless runs skip the LLM call entirely. CRSEC_HEADLESS=1.
+    if os.environ.get("CRSEC_HEADLESS") == "1":
+        call_profiler.incr("pronunciatio_headless_stub")
+        return "💬", ["💬", "", None, [action_description], "💬"]
+
+    cache_key = ("pronunciatio", action_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 4")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
@@ -1168,7 +1216,9 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
     print(f"[FAIL_SAFE] run_gpt_prompt_pronunciatio: ChatGPT path returned False, using fail_safe", file=sys.stderr)
     return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
@@ -1254,6 +1304,13 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
     #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
+    # The prompt only depends on persona.name + action_description, so this
+    # key fully determines the prompt text (lossless memoization at temp 0).
+    cache_key = ("event_triple", persona.name, action_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 30,
                  "temperature": 0, "top_p": 1, "stream": False,
                  "frequency_penalty": 0, "presence_penalty": 0, "stop": ["\n"]}
@@ -1265,13 +1322,17 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
     # __func_validate, __func_clean_up)
     output = GPT4_safe_generate_response_OLD(prompt, 3, fail_safe,
                                              __func_validate, __func_clean_up)
+    raw_output = output
     output = (persona.name, output[0], output[1])
 
     if debug or verbose:
         print_run_prompts(prompt_template, persona, gpt_param,
                           prompt_input, prompt, output)
 
-    return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    if raw_output is not fail_safe:
+        _memo_put(cache_key, ret)
+    return ret
 
 
 def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=False):
@@ -2179,6 +2240,15 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
         except:
             return False
 
+    # Keyed on (name, ISS, description): the ISS is part of the prompt and
+    # can change (e.g. revised "currently"), so it must be in the key for
+    # memoization to stay lossless.
+    cache_key = ("event_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 7")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
@@ -2192,7 +2262,9 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
     print(f"[FAIL_SAFE] run_gpt_prompt_event_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
     return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
@@ -2276,6 +2348,13 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
         except:
             return False
 
+    # See event_poignancy: ISS is in the prompt, so it's in the key.
+    cache_key = ("thought_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 8")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
@@ -2289,7 +2368,9 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
     print(f"[FAIL_SAFE] run_gpt_prompt_thought_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
     return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
@@ -2373,6 +2454,13 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
         except:
             return False
 
+    # See event_poignancy: ISS is in the prompt, so it's in the key.
+    cache_key = ("chat_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 9")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
@@ -2386,7 +2474,9 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
     print(f"[FAIL_SAFE] run_gpt_prompt_chat_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
     return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================

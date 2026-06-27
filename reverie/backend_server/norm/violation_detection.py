@@ -5,11 +5,94 @@ Description: Norm-violation perception and response pipeline.
 detect_violations  — inspects perceived events for norm violations by other agents.
 process_violations — updates observer trust, logs, and triggers confront/gossip/ignore.
 """
+import os
+import re
 import sys
 
 sys.path.append('../')
 
+import call_profiler
 from norm.run_gpt_prompt_norm import run_gpt_prompt_violation_check
+
+
+# ----------------------------------------------------------------------------
+# Violation-check pre-filter (Step 3 of the perf pass). Flag-gated, default
+# ON; disable with CRSEC_VIOLATION_PREFILTER=0. Two stages before any LLM
+# call:
+#   (a) benign-pattern skip: events that cannot constitute a norm violation
+#       (idle / sleeping / waiting / routine chatting);
+#   (b) keyword-stem overlap: the event description must share at least one
+#       content-word stem with the norm (built from the norm's
+#       subject/predicate/object fields, falling back to norm.content).
+# Skip counts are recorded in profile.json (counters: prefilter_skipped_benign,
+# prefilter_skipped_no_overlap, prefilter_llm_checked) to audit reach.
+# ----------------------------------------------------------------------------
+
+_BENIGN_PATTERNS = (
+    "is chat with",
+    "chatting with",
+    "conversing about",
+    "is idle",
+    "sleeping",
+    "<waiting",
+)
+
+_STOPWORDS = {
+    "the", "a", "an", "is", "are", "was", "were", "be", "being", "been",
+    "to", "of", "in", "on", "at", "for", "with", "and", "or", "not", "no",
+    "do", "does", "did", "doing", "have", "has", "had", "it", "its", "this",
+    "that", "these", "those", "by", "from", "as", "into", "their", "his",
+    "her", "they", "them", "he", "she", "you", "your", "we", "our", "i",
+    "should", "must", "shall", "will", "would", "can", "could", "may",
+    "might", "one", "everyone", "anyone", "people", "person", "all", "any",
+    "allowed", "allow", "while", "when", "during", "other", "others",
+}
+
+
+def _stem(word):
+    """Crude suffix-stripping stem; good enough for overlap screening."""
+    w = word.lower()
+    for suffix in ("ing", "edly", "ed", "es", "s"):
+        if w.endswith(suffix) and len(w) - len(suffix) >= 3:
+            w = w[:len(w) - len(suffix)]
+            break
+    return w
+
+
+def _stems(text):
+    """Set of content-word stems from free text."""
+    out = set()
+    for word in re.findall(r"[a-zA-Z]+", text or ""):
+        if word.lower() in _STOPWORDS or len(word) < 3:
+            continue
+        out.add(_stem(word))
+    return out
+
+
+def _norm_stems(norm):
+    """Stem set for a norm, cached on the norm object."""
+    cached = getattr(norm, "_prefilter_stems", None)
+    if cached is not None:
+        return cached
+    text = " ".join(str(getattr(norm, field, "") or "")
+                    for field in ("subject", "predicate", "object"))
+    stems = _stems(text)
+    if not stems:  # malformed/empty s-p-o: fall back to the full content
+        stems = _stems(getattr(norm, "content", "") or "")
+    try:
+        norm._prefilter_stems = stems
+    except Exception:
+        pass
+    return stems
+
+
+def _is_benign_event(event_desc):
+    low = event_desc.lower()
+    return any(p in low for p in _BENIGN_PATTERNS)
+
+
+def _prefilter_enabled():
+    return os.environ.get("CRSEC_VIOLATION_PREFILTER", "1") != "0"
 
 
 def detect_violations(observer_persona, perceived_events, personas):
@@ -50,7 +133,25 @@ def detect_violations(observer_persona, perceived_events, personas):
 
         event_desc = f"{subject} is {predicate} {obj}".strip()
 
+        prefilter = _prefilter_enabled()
+
+        # Pre-filter stage (a): benign events can't violate a norm.
+        if prefilter and _is_benign_event(event_desc):
+            call_profiler.incr("prefilter_skipped_benign", len(active_norms))
+            continue
+
+        event_stems = _stems(event_desc) if prefilter else None
+
         for norm in active_norms:
+            # Pre-filter stage (b): require at least one stem overlap between
+            # the event and the norm; empty norm stems fail open (LLM check).
+            if prefilter:
+                norm_stems = _norm_stems(norm)
+                if norm_stems and not (event_stems & norm_stems):
+                    call_profiler.incr("prefilter_skipped_no_overlap")
+                    continue
+                call_profiler.incr("prefilter_llm_checked")
+
             try:
                 result = run_gpt_prompt_violation_check(
                     event_desc, norm.content, observer_name)[0]

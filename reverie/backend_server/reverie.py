@@ -30,6 +30,7 @@ import traceback
 
 from selenium import webdriver
 
+import call_profiler
 from global_methods import *
 from utils import *
 from maze import *
@@ -211,6 +212,10 @@ class ReverieServer:
     # Save metrics
     if hasattr(self, 'metrics'):
       self.metrics.save_all()
+
+    # Dump the LLM call profile (counts + cumulative seconds per prompt
+    # function, plus cache/pre-filter counters). See call_profiler.py.
+    call_profiler.dump(f"{sim_folder}/profile.json")
 
 
   def start_path_tester_server(self):

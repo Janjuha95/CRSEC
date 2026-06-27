@@ -1,7 +1,10 @@
 import sys
 import re
+import os
+import copy
 
 sys.path.append('../')
+import call_profiler
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.gpt_structure import (
     _strip_scaffolding, _extract_first_int, _extract_yes_no,
@@ -1135,6 +1138,16 @@ def run_gpt_prompt_daily_plan_v2(persona, wake_up_hour, curr_act_norm, test_inpu
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
 
 
+# Memoization for violation checks (Step 1a of the perf pass). Agent actions
+# persist 30-360 ticks, so identical (observer, event_desc, norm) triples
+# repeat hundreds of times; with temperature pinned to 0 in llm_router the
+# LLM output is deterministic, so caching is lossless. Disable with
+# CRSEC_MEMOIZE=0. Fail-safe results (LLM error / parse failure) are NOT
+# cached so transient errors don't get frozen in.
+_VIOLATION_CACHE = {}
+_VIOLATION_CACHE_MAX = 50000
+
+
 def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verbose=False):
     def create_prompt_input(event_desc, norm_content, observer_name):
         prompt_input = []
@@ -1170,6 +1183,12 @@ def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verb
     def get_fail_safe():
         return {"violation": False, "severity": 0, "certainty": 0, "response": "ignore"}
 
+    memoize = os.environ.get("CRSEC_MEMOIZE", "1") != "0"
+    cache_key = (observer_name, event_desc, norm_content)
+    if memoize and cache_key in _VIOLATION_CACHE:
+        call_profiler.incr("violation_check_cache_hit")
+        return copy.deepcopy(_VIOLATION_CACHE[cache_key])
+
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 150,
                  "temperature": 0, "top_p": 1, "stream": False,
                  "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
@@ -1182,4 +1201,12 @@ def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verb
                                              __func_validate, __func_clean_up)
     if debug or verbose:
         print_run_prompts_norm(prompt_template, gpt_param, prompt_input, prompt, output)
-    return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+
+    ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    # Cache only validated successes (fail_safe is returned by identity on
+    # LLM/parse failure, so `is` distinguishes it from a real no-violation).
+    if memoize and output is not fail_safe:
+        if len(_VIOLATION_CACHE) >= _VIOLATION_CACHE_MAX:
+            _VIOLATION_CACHE.pop(next(iter(_VIOLATION_CACHE)))
+        _VIOLATION_CACHE[cache_key] = copy.deepcopy(ret)
+    return ret
