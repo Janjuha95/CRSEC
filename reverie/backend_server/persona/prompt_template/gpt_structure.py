@@ -246,25 +246,34 @@ def ChatGPT_safe_generate_response(prompt,
 
   for i in range(repeat): 
 
-    try: 
+    try:
       curr_gpt_response = ChatGPT_request(prompt).strip()
+      # Envelope-tolerant parse: prefer the {"output": ...} envelope, but slice
+      # to the first '{' so leading prose ("text\n{...}") doesn't break it. If
+      # there is no parseable envelope (bare int, "5/10", plain text), fall
+      # back to the raw stripped response and let func_validate / func_clean_up
+      # decide. Well-formed envelopes still parse to exactly the same value as
+      # before, so callers that already work are unaffected.
       end_index = curr_gpt_response.rfind('}') + 1
-      curr_gpt_response = curr_gpt_response[:end_index]
-      curr_gpt_response = json.loads(curr_gpt_response)["output"]
+      start_index = curr_gpt_response.find('{')
+      if start_index != -1 and end_index > start_index:
+        envelope = curr_gpt_response[start_index:end_index]
+      else:
+        envelope = curr_gpt_response[:end_index]
+      try:
+        candidate = json.loads(envelope)["output"]
+      except Exception:
+        candidate = curr_gpt_response
 
-      # print ("---ashdfaf")
-      # print (curr_gpt_response)
-      # print ("000asdfhia")
-      
-      if func_validate(curr_gpt_response, prompt=prompt): 
-        return func_clean_up(curr_gpt_response, prompt=prompt)
-      
-      if verbose: 
-        print ("---- repeat count: \n", i, curr_gpt_response)
-        print (curr_gpt_response)
+      if func_validate(candidate, prompt=prompt):
+        return func_clean_up(candidate, prompt=prompt)
+
+      if verbose:
+        print ("---- repeat count: \n", i, candidate)
+        print (candidate)
         print ("~~~~")
 
-    except: 
+    except:
       pass
 
   return False

@@ -2235,7 +2235,7 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
@@ -2249,7 +2249,6 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
     if cached is not None:
         return cached
 
-    print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 7")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
                  "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
@@ -2260,7 +2259,7 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
     special_instruction = "The output should ONLY contain ONE integer value on the scale of 1 to 10."  ########
     fail_safe = get_fail_safe()  ########
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-                                            __chat_func_validate, __chat_func_clean_up, True)
+                                            __chat_func_validate, __chat_func_clean_up)
     if output != False:
         ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
         _memo_put(cache_key, ret)
@@ -2343,7 +2342,7 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
@@ -2449,7 +2448,7 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False

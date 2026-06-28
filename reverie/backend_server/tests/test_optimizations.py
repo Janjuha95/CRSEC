@@ -498,6 +498,97 @@ class TestConflictParserIntegration(unittest.TestCase):
         self.assertNotEqual(out[0], "yes")
 
 
+class TestPoignancyEnvelopeTolerance(EnvMixin, unittest.TestCase):
+    """Part B: ChatGPT_safe_generate_response tolerates non-envelope qwen3
+    output, so poignancy returns real ints instead of [FAIL_SAFE]."""
+
+    def setUp(self):
+        run_gpt_prompt._PROMPT_CACHE.clear()
+        self.setenv("CRSEC_MEMOIZE", "1")
+        self.setenv("CRSEC_HEADLESS", None)
+
+    def _poignancy(self, raw_response, desc):
+        # Patch at the request boundary so the REAL
+        # ChatGPT_safe_generate_response envelope handling runs.
+        from persona.prompt_template import gpt_structure
+        with patch.object(gpt_structure, "ChatGPT_request",
+                          lambda prompt: raw_response):
+            out, _meta = run_gpt_prompt.run_gpt_prompt_event_poignancy(
+                FakePersona("Klaus Mueller"), desc)
+        return out
+
+    def test_envelope_tolerant_paths(self):
+        cases = [
+            ("5", 5),                         # bare int
+            ("I'd rate it 5/10.", 5),         # prose + slash
+            ('text\n{"output":"7"}', 7),      # prose before the envelope
+            ('{"output":"3"}', 3),            # clean envelope (unchanged path)
+        ]
+        for i, (raw, expected) in enumerate(cases):
+            out = self._poignancy(raw, f"event number {i}")
+            self.assertEqual(out, expected, f"raw={raw!r} -> {out!r}")
+            self.assertNotEqual(out, 4, f"fail-safe fired for raw={raw!r}")
+
+
+class TestSpecificNormUtilityPort(unittest.TestCase):
+    """Part C: SpecificNormUtility routes through llm_call and always returns a
+    length-2 [score, reason] (no OpenAI NameError, no bare False)."""
+
+    def test_parses_output_line(self):
+        snu = run_gpt_prompt_norm.SpecificNormUtility("system msg")
+        with patch.object(run_gpt_prompt_norm, "llm_call",
+                          return_value="OUTPUT: 7. because X"):
+            res = snu.specific_norm_utility("No smoking in the cafe.")
+        self.assertEqual(res, [7, "because X"])
+
+    def test_failsafe_is_length_2(self):
+        snu = run_gpt_prompt_norm.SpecificNormUtility("system msg")
+
+        def boom(*a, **k):
+            raise RuntimeError("inference down")
+
+        with patch.object(run_gpt_prompt_norm, "llm_call", boom):
+            res = snu.specific_norm_utility("No smoking in the cafe.")
+        self.assertIsInstance(res, list)
+        self.assertEqual(len(res), 2)
+
+    def test_consumer_does_not_raise_on_failsafe(self):
+        """generate_normal_norm_utility (the norm_evaluate consumer feeding the
+        `len(utility) != 2` check) must return a length-2 value, not crash,
+        when inference fails."""
+        from norm import norm_evaluate
+        persona = types.SimpleNamespace(scratch=types.SimpleNamespace(
+            is_defector=lambda: False, get_str_iss=lambda: "ISS block"))
+        norm = types.SimpleNamespace(content="No smoking in the cafe.")
+
+        def boom(*a, **k):
+            raise RuntimeError("inference down")
+
+        with patch.object(run_gpt_prompt_norm, "llm_call", boom):
+            util = norm_evaluate.generate_normal_norm_utility(norm, persona)
+        self.assertTrue(isinstance(util, (list, tuple)) and len(util) == 2)
+
+
+class TestDefectorNormUtilityShape(unittest.TestCase):
+    """Part C: the defector mirror is shape-matched to SpecificNormUtility."""
+
+    def test_parses_and_failsafe_length_2(self):
+        from norm import defection_engine
+        persona = types.SimpleNamespace(scratch=types.SimpleNamespace())
+
+        with patch.object(defection_engine, "llm_call",
+                          return_value="OUTPUT: 7. because X"):
+            res = defection_engine.get_defector_norm_utility("norm", persona)
+        self.assertEqual(res, [7, "because X"])
+
+        def boom(*a, **k):
+            raise RuntimeError("inference down")
+
+        with patch.object(defection_engine, "llm_call", boom):
+            res = defection_engine.get_defector_norm_utility("norm", persona)
+        self.assertTrue(isinstance(res, (list, tuple)) and len(res) == 2)
+
+
 class TestProfiler(unittest.TestCase):
     def test_record_and_snapshot(self):
         call_profiler.reset()
@@ -513,6 +604,35 @@ class TestProfiler(unittest.TestCase):
     def test_dump_never_raises(self):
         call_profiler.dump(os.path.join(HERE, "..", "nonexistent_dir_zz",
                                         "x", "profile.json"))
+
+    def test_set_dump_path_writes_file_with_counts(self):
+        """set_dump_path creates the file immediately (step 0) and a later
+        dump reflects the recorded calls."""
+        import json
+        import tempfile
+        call_profiler.reset()
+        self.addCleanup(call_profiler.reset)
+        # Reset the global dump path so a later test's record_call doesn't try
+        # to flush to the (deleted) temp dir.
+        self.addCleanup(call_profiler.set_dump_path, None)
+
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "profile.json")
+            call_profiler.set_dump_path(target)
+            # File exists from step 0, before any calls are recorded.
+            self.assertTrue(os.path.exists(target))
+
+            n = 7
+            for _ in range(n):
+                call_profiler.record_call("run_gpt_prompt_demo", 0.01)
+            call_profiler.dump(target)
+
+            with open(target, encoding="utf-8") as f:
+                data = json.load(f)
+            self.assertEqual(data["total_llm_calls"], n)
+            self.assertTrue(data["per_function"])  # non-empty
+            self.assertEqual(
+                data["per_function"]["run_gpt_prompt_demo"]["count"], n)
 
 
 if __name__ == "__main__":

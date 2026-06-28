@@ -96,13 +96,16 @@ def get_defector_norm_utility(norm_content, persona):
     Self-interested utility score for a norm, from a defector's perspective.
 
     Mirrors SpecificNormUtility.specific_norm_utility so callers can treat the
-    return value identically: [score:int, reason:str] on success, [False] on failure.
+    return value identically: a length-2 [score:int, reason:str] on success,
+    and a shape-matched [int, reason] fail-safe (never a bare False or [False])
+    on failure, so the consumer's `len(utility) == 2` check always holds.
     """
+    fail_safe = [4, "fail_safe"]
     try:
         prompt = generate_prompt([norm_content], DEFECTOR_NORM_UTILITY_PROMPT)
         response = llm_call(prompt, call_type="norm_evaluation")
     except Exception:
-        return [False]
+        return fail_safe
 
     try:
         tail = response.split("OUTPUT: ")[-1]
@@ -110,4 +113,4 @@ def get_defector_norm_utility(norm_content, persona):
         reason = tail.split(". ", 1)[1].strip() if ". " in tail else ""
         return [score, reason]
     except Exception:
-        return [False]
+        return fail_safe

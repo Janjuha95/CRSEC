@@ -26,6 +26,7 @@ import time
 import math
 import os
 import shutil
+import signal
 import traceback
 
 from selenium import webdriver
@@ -68,6 +69,23 @@ class ReverieServer:
     # flush (every N calls) and the atexit fallback land next to the final
     # profile written by save(). See call_profiler.py.
     call_profiler.set_dump_path(f"{sim_folder}/profile.json")
+
+    # Hard-exit safety net: flush the profile on SIGINT (Ctrl-C) / SIGTERM
+    # (e.g. an external `kill`) so a killed run still leaves a current
+    # profile.json, then restore the default disposition and re-raise so the
+    # process terminates with normal signal semantics. SIGKILL (kill -9) and
+    # a Windows TerminateProcess cannot be caught, so those still skip this.
+    def _dump_profile_on_signal(signum, frame):
+      call_profiler.dump(f"{sim_folder}/profile.json")
+      signal.signal(signum, signal.SIG_DFL)
+      os.kill(os.getpid(), signum)
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+      try:
+        signal.signal(_sig, _dump_profile_on_signal)
+      except (ValueError, OSError):
+        # signal.signal only works in the main thread / for supported
+        # signals; ignore where it isn't available.
+        pass
 
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
@@ -435,10 +453,15 @@ class ReverieServer:
           #  "meta": {curr_time: <datetime>}}
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
           os.makedirs(os.path.dirname(curr_move_file), exist_ok=True)
-          with open(curr_move_file, "w") as outfile: 
+          with open(curr_move_file, "w") as outfile:
             outfile.write(json.dumps(movements, indent=2))
 
-          # After this cycle, the world takes one step forward, and the 
+          # Flush the LLM-call profile every step so a mid-run inspection (or
+          # a hard-killed run) sees current numbers regardless of call volume.
+          # Instrumentation only -- no effect on the sim.
+          call_profiler.dump(f"{sim_folder}/profile.json")
+
+          # After this cycle, the world takes one step forward, and the
           # current time moves by <sec_per_step> amount. 
           self.step += 1
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)

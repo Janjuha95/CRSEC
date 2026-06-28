@@ -5,6 +5,7 @@ import copy
 
 sys.path.append('../')
 import call_profiler
+from llm_router import llm_call
 from persona.prompt_template.gpt_structure import *
 from persona.prompt_template.gpt_structure import (
     _strip_scaffolding, _extract_first_int, _extract_yes_no,
@@ -937,22 +938,20 @@ class SpecificNormUtility:
 
         user_prompt = {"role": "user", "content": prompt}
         self.msg.append(user_prompt)
-        print(self.msg)
+
+        # Route through the local Ollama router (mirrors norm/creation.py
+        # Creation.creation) instead of the removed OpenAI client. The
+        # fail-safe is shape-matched ([int, reason], length 2) so the consumer
+        # in norm_evaluate.py (`if len(utility) != 2`) never sees a bare False.
+        fail_safe = [4, "fail_safe"]
+        composed = "\n\n".join(m["content"] for m in self.msg)
         try:
-            gpt_ret = openai.ChatCompletion.create(model=self.model, messages=self.msg, temperature=self.temp,
-                                                   max_tokens=self.max_tokens, top_p=self.top_p,
-                                                   frequency_penalty=self.frequency_penalty,
-                                                   presence_penalty=self.presence_penalty)
-        except:
-            return False
-        print(gpt_ret)
-        ret_str = gpt_ret["choices"][0]["message"]["content"]
-        try:
+            ret_str = llm_call(composed, call_type="norm_evaluation")
             x1 = int(ret_str.split("OUTPUT: ")[-1].split('.')[0])
             x2 = ret_str.split("OUTPUT: ")[-1].split('. ')[1]
             return [x1, x2]
-        except:
-            return [False]
+        except Exception:
+            return fail_safe
 
 
 def run_gpt_revise_identity_plan(statements, p_name, time, verbose=False):

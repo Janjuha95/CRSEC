@@ -563,7 +563,9 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
 
     # normal norm
     utility = generate_normal_norm_utility(new_norm, persona)
-    if len(utility) != 2:
+    # Defense in depth: a malformed utility (bare False, [False], None) must not
+    # crash the unpack below. len(False) is a TypeError, so check the shape.
+    if not isinstance(utility, (list, tuple)) or len(utility) != 2:
         return False, new_norm
     new_norm.poignancy = utility[0]
     new_norm.poi_reason = utility[1]

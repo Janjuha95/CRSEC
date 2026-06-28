@@ -49,6 +49,11 @@ environment/frontend_server/temp_storage/
 # LLM call logs
 reverie/backend_server/llm_logs/
 
+# LLM-call profiler output (generated per-sim under storage/, plus the cwd
+# fallback). Always an artifact -- never commit it.
+profile.json
+**/profile.json
+
 # Secrets / env
 .env
 .env.local

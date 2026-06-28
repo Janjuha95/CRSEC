@@ -2,7 +2,120 @@
 
 Branch: `norm_deflection`. Instrumentation + targeted fixes only; no
 architectural changes. All work verified with `python -m pytest tests/`
-(108 passed) from `reverie/backend_server/`.
+(114 passed) from `reverie/backend_server/`.
+
+---
+
+## 2026-06-28 — profiler observability, poignancy envelope, OpenAI removal
+
+Three independent fixes. The conflict parser (`_final_output_decision`) was
+already correct and was left untouched. No validated success-path return value
+was changed.
+
+### Part A — profiler observability (instrumentation only)
+
+Already landed in `eb29f9c` (verified this pass): `set_dump_path` resolves the
+path to absolute, prints `[profiler] writing to <abspath>`, and writes an
+initial `dump()` so the file exists from step 0; `_FLUSH_EVERY` lowered
+`200 → 25`; `reverie.start_server` dumps every step right after the movement
+JSON; SIGINT/SIGTERM handlers dump then re-raise (SIGKILL can't be caught);
+the committed `backend_server/profile.json` dummy was removed and
+`profile.json` + `**/profile.json` added to `.gitignore`. Test:
+`TestProfiler::test_set_dump_path_writes_file_with_counts`.
+
+### Part B — poignancy fail-safe on every call
+
+Root cause: `ChatGPT_safe_generate_response`
+(`persona/prompt_template/gpt_structure.py`) did
+`json.loads(curr[:rfind('}')+1])["output"]`, which throws on any qwen3 output
+that isn't a bare `{"output": ...}` envelope (bare int, `5/10`, prose before
+the `{`). The `except: pass` then burned all retries → `False` → `[FAIL_SAFE]`,
+so the poignancy `func_clean_up` int-extractor was never reached.
+
+- `ChatGPT_safe_generate_response` is now envelope-tolerant: it slices to the
+  first `{` (so `text\n{...}` parses), wraps the `["output"]` extraction in its
+  own `try`, and on failure falls back to the **raw stripped response** passed
+  to `func_validate` / `func_clean_up`. Well-formed envelopes parse to exactly
+  the same value as before, so working callers are unaffected.
+- Removed the stray `print("…DEBUG 7")` and the trailing `True` (verbose) arg
+  at the `run_gpt_prompt_event_poignancy` call site.
+- Fixed the latent inconsistency in all three poignancy functions
+  (event/thought/chat) where `__chat_func_validate` validated via
+  `__func_clean_up` instead of `__chat_func_clean_up` — validation now matches
+  the value actually returned. (Left the other ~6 unrelated functions that share
+  the pattern untouched.)
+- Test: `TestPoignancyEnvelopeTolerance` feeds `"5"`, `"I'd rate it 5/10."`,
+  `text\n{"output":"7"}`, `{"output":"3"}` through the real poignancy path and
+  asserts ints `5/5/7/3` with no fail-safe.
+
+### Part C — port SpecificNormUtility off OpenAI (#8), crash-safe
+
+Root cause: `SpecificNormUtility.specific_norm_utility`
+(`norm/run_gpt_prompt_norm.py`) called `openai.ChatCompletion.create(...)`, but
+`openai` is never imported → `NameError` → `except: return False`. The consumer
+`norm_evaluate.py:565` then did `if len(utility) != 2` — `len(False)` is a
+`TypeError` that crashed any long run reaching `norms_evaluate`.
+
+- `specific_norm_utility` now routes through `from llm_router import llm_call`
+  with `call_type="norm_evaluation"`, joining `self.msg` contents exactly like
+  `norm/creation.py` `Creation.creation`. The `OUTPUT: <int>. <reason>` parse is
+  kept, but the fail-safe is shape-matched: any inference/parse failure returns
+  `[4, "fail_safe"]` (length 2) — never bare `False`/`[False]`. Removed the
+  `print(self.msg)` / `print(gpt_ret)` debug lines.
+- Defense in depth at `norm_evaluate.py:565`:
+  `if not isinstance(utility, (list, tuple)) or len(utility) != 2: return False, new_norm`.
+- The defector mirror `defection_engine.get_defector_norm_utility` now returns
+  the same length-2 `[4, "fail_safe"]` on failure (was `[False]`); docstring
+  updated.
+- `model="gpt-3.5-turbo-16k"` on `SpecificNormUtility`/`Creation` is dead config
+  (everything routes through `llm_call`) — left as-is, harmless.
+- Tests: `TestSpecificNormUtilityPort` (parse → `[7, "because X"]`; raise →
+  length-2 fail-safe; `generate_normal_norm_utility` consumer does not raise)
+  and `TestDefectorNormUtilityShape` (parse + length-2 fail-safe).
+
+---
+
+## Follow-up — profiler output reliability
+
+The profiler records correctly (at `llm_router.llm_call`), but `profile.json`
+looked empty in practice: real dumps land in
+`environment/frontend_server/storage/<sim>/profile.json` while the stale
+committed `backend_server/profile.json` was being read, and the file only
+flushed every 200 calls or on `fin`, so short / hard-killed runs never wrote
+it. These changes make the output reliable. Instrumentation only — no sim
+behavior or success-path returns changed. Recording was **not** added to
+`gpt_structure.py` (every call already funnels through `llm_router`;
+double-recording would inflate counts).
+
+- **Unambiguous active path** (`call_profiler.set_dump_path`): the path is now
+  resolved with `os.path.abspath`, announced once as
+  `[profiler] writing to <abspath>`, and an initial `dump()` is written
+  immediately so the file exists from step 0. `set_dump_path(None)` is
+  tolerated (turns auto-dumps back off; used by tests).
+- **Tighter flush cadence** (`call_profiler._FLUSH_EVERY`): `200 → 25`.
+  Primary cadence is now the per-step dump below; this is the safety net for
+  steps that issue many calls.
+- **Per-step dump** (`reverie.start_server`): right after the per-step movement
+  JSON is written, `call_profiler.dump(f"{sim_folder}/profile.json")` runs, so
+  the profile updates every step regardless of call volume.
+- **Survive hard exits** (`reverie.py`): added `import signal`; in
+  `ReverieServer.__init__` (right after `set_dump_path`) SIGINT/SIGTERM
+  handlers dump the profile, restore the default disposition, and re-raise so
+  the process still terminates normally. Handler registration is guarded
+  (`signal.signal` only works in the main thread). SIGKILL / Windows
+  TerminateProcess cannot be caught — noted in the code comment.
+- **Removed the misleading fixture**: deleted the committed
+  `reverie/backend_server/profile.json` (the `run_gpt_prompt_x` /
+  `some_counter` dummy) via `git rm`, and added `profile.json` +
+  `**/profile.json` to `.gitignore` (it is always a generated artifact).
+
+### Test
+
+`tests/test_optimizations.py::TestProfiler::test_set_dump_path_writes_file_with_counts`
+— `set_dump_path` to a temp file (asserts the file exists from step 0), record
+N=7 calls, `dump()`, then assert `total_llm_calls == 7` and a non-empty
+`per_function` with the right per-function count. Cleanup resets the profiler
+and the global dump path.
 
 ---
 

@@ -36,7 +36,10 @@ _dump_path = None
 _DEFAULT_DUMP_PATH = os.path.join(os.getcwd(), "profile.json")
 
 # Flush cadence for the incremental dump (A2). Counts every recorded call.
-_FLUSH_EVERY = 200
+# Kept low so short runs and mid-run inspections see current numbers; the
+# per-step dump in reverie.start_server is the primary cadence, this is the
+# safety net for steps that issue many calls.
+_FLUSH_EVERY = 25
 _calls_since_flush = 0
 
 
@@ -44,11 +47,23 @@ def set_dump_path(path):
     """Point incremental/atexit dumps at `path` (e.g. <sim_folder>/profile.json).
 
     Called once at sim startup. Enabling a path is also what turns the
-    incremental and atexit auto-dumps on.
+    incremental and atexit auto-dumps on. The path is resolved to an absolute
+    path and announced once, and an initial profile is written immediately so
+    the file exists from step 0 (before the first flush). Passing None turns
+    auto-dumps back off (used by tests).
     """
     global _dump_path
+    if path is None:
+        with _lock:
+            _dump_path = None
+        return
+    abspath = os.path.abspath(path)
     with _lock:
-        _dump_path = path
+        _dump_path = abspath
+    # Make the active target unambiguous (dumps no longer land in a surprising
+    # cwd) and guarantee the file exists from the start.
+    print(f"[profiler] writing to {abspath}")
+    dump()
 
 
 def record_call(fn_name, seconds):
