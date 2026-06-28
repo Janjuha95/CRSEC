@@ -43,10 +43,14 @@ SMALL_MODEL = os.environ.get("CRSEC_SMALL_MODEL", "qwen3:4b")
 SMALL_ROUTE_PROMPT_FNS = {
     "run_gpt_prompt_pronunciatio",       # emoji cosmetics
     "run_gpt_prompt_event_triple",       # (s, p, o) extraction
-    "run_gpt_prompt_event_poignancy",    # 1-10 score
-    "run_gpt_prompt_thought_poignancy",  # 1-10 score
-    "run_gpt_prompt_chat_poignancy",     # 1-10 score
 }
+# NOTE: the three poignancy functions were removed from small-model routing.
+# They go through ChatGPT_safe_generate_response, which demands a strict
+# {"output": "<int>"} JSON envelope; qwen3:4b does not reliably emit that
+# envelope, so json.loads(...)["output"] threw on every repeat and the
+# wrapper returned False -> [FAIL_SAFE] on nearly every poignancy call. The
+# larger primary model satisfies the envelope, so poignancy stays on it.
+# See PATCH_LOG.md (Part B).
 
 # Per-request Ollama options (Step 1d). The sim's determinism (and therefore
 # the memoization in run_gpt_prompt*.py) relies on temperature 0, so it is
@@ -119,6 +123,13 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
     if (prompt_fn in SMALL_ROUTE_PROMPT_FNS
             and os.environ.get("CRSEC_TIERED_ROUTING", "1") != "0"):
         model = SMALL_MODEL
+
+    # Routing-tier attribution (A3): one counter per logical call (before the
+    # retry loop) so the small/primary split is auditable over a long run.
+    if model == SMALL_MODEL:
+        call_profiler.incr("small_model_call")
+    else:
+        call_profiler.incr("primary_model_call")
 
     messages = [
         {"role": "system", "content": NO_THINK_SYSTEM},

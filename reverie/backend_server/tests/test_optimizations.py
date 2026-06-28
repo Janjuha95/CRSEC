@@ -379,7 +379,7 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
 
     def test_small_model_for_cosmetic_fns(self):
         self.setenv("CRSEC_TIERED_ROUTING", "1")
-        kwargs = self._call_via("run_gpt_prompt_event_poignancy")
+        kwargs = self._call_via("run_gpt_prompt_pronunciatio")
         self.assertEqual(kwargs["model"], llm_router.SMALL_MODEL)
 
     def test_reasoning_model_for_other_fns(self):
@@ -387,9 +387,21 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
         kwargs = self._call_via("run_gpt_prompt_violation_check")
         self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
 
+    def test_poignancy_uses_primary_model(self):
+        """Part B regression: poignancy must NOT route to the small model even
+        with tiered routing on (qwen3:4b can't satisfy the strict JSON
+        envelope of ChatGPT_safe_generate_response)."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        for fn in ("run_gpt_prompt_event_poignancy",
+                   "run_gpt_prompt_thought_poignancy",
+                   "run_gpt_prompt_chat_poignancy"):
+            kwargs = self._call_via(fn)
+            self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL,
+                             f"{fn} should route to the primary model")
+
     def test_tiered_routing_disabled(self):
         self.setenv("CRSEC_TIERED_ROUTING", "0")
-        kwargs = self._call_via("run_gpt_prompt_event_poignancy")
+        kwargs = self._call_via("run_gpt_prompt_pronunciatio")
         self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
 
     def test_options_pin_temperature_and_num_ctx(self):
@@ -397,6 +409,93 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
         self.assertEqual(kwargs["options"]["temperature"], 0.0)
         self.assertEqual(kwargs["options"]["num_ctx"], llm_router.OLLAMA_NUM_CTX)
         self.assertFalse(kwargs["think"])
+
+
+class TestConflictParserUnit(unittest.TestCase):
+    """Part C: _final_output_decision reads the FINAL OUTPUT line
+    authoritatively (markdown / brackets / preamble tolerant)."""
+
+    def test_reasons_no_final_output_no(self):
+        sample = (
+            "- Question 1: whether there is a conflict?\n"
+            "Reasoning: It would be a conflict, yes, only if Klaus were "
+            "littering, but he is idle, so there is no conflict.\n"
+            'Answer in "yes" or "no" and provide a reason: No // idle.\n'
+            "- FINAL OUTPUT: No."
+        )
+        self.assertEqual(run_gpt_prompt_norm._final_output_decision(sample), "no")
+
+    def test_final_output_yes(self):
+        sample = ("Reasoning: there is clearly a conflict here.\n"
+                  "- FINAL OUTPUT: Yes.")
+        self.assertEqual(run_gpt_prompt_norm._final_output_decision(sample), "yes")
+
+    def test_markdown_and_brackets(self):
+        self.assertEqual(
+            run_gpt_prompt_norm._final_output_decision("FINAL OUTPUT: **No**"), "no")
+        self.assertEqual(
+            run_gpt_prompt_norm._final_output_decision("FINAL OUTPUT: [Yes]"), "yes")
+
+    def test_answer_on_next_line(self):
+        self.assertEqual(
+            run_gpt_prompt_norm._final_output_decision("FINAL OUTPUT:\nNo."), "no")
+
+    def test_no_decision_returns_none(self):
+        self.assertIsNone(
+            run_gpt_prompt_norm._final_output_decision("Unable to assess."))
+
+
+class TestConflictParserIntegration(unittest.TestCase):
+    """Part C end-to-end: run_gpt_prompt_decide_if_norm_conflict must not
+    invert No->Yes, and ['ERROR'] must cleanly mean skip."""
+
+    def _decide(self, response_text):
+        from persona.prompt_template import gpt_structure
+        with patch.object(gpt_structure, "GPT4_request",
+                          lambda prompt: response_text), \
+                patch.object(run_gpt_prompt_norm, "debug", False):
+            out, _meta = (
+                run_gpt_prompt_norm.run_gpt_prompt_decide_if_norm_conflict(
+                    "Klaus Mueller is idle",
+                    "People should not litter in the park.",
+                    "Klaus Mueller", "citizen",
+                    "friendly and conscientious"))
+        return out
+
+    def test_reasons_no_final_output_no_is_no_conflict(self):
+        # Reasoning carries a stray 'yes'; conclusion + FINAL OUTPUT are No.
+        # The old parser grabbed the stray 'yes' (no->yes inversion).
+        sample = (
+            "Let's think step by step.\n"
+            "- Question 1: whether there is a conflict?\n"
+            "Reasoning: The norm is about littering. It would be a conflict, "
+            "yes, only if Klaus were littering, but he is idle. So there is "
+            "no conflict.\n"
+            'Answer in "yes" or "no" and provide a reason: No // Klaus is idle.\n'
+            "- Question 2: whether to have a conversation about the conflict?\n"
+            "Reasoning: There is no conflict, so no conversation is needed.\n"
+            'Answer in "yes" or "no" and provide a reason: No // nothing.\n'
+            "- Question 3: ...\nAnswer: []\n"
+            "- FINAL OUTPUT: No."
+        )
+        out = self._decide(sample)
+        self.assertEqual(len(out), 3)
+        self.assertEqual(out[0], "no")   # conversation/talk decision
+        self.assertEqual(out[2], "no")   # conflict=False (not inverted)
+
+    def test_final_output_yes_is_conflict(self):
+        sample = ("- Question 1: whether there is a conflict?\n"
+                  'Answer in "yes" or "no" and provide a reason: Yes // smoking.\n'
+                  "- FINAL OUTPUT: Yes.")
+        out = self._decide(sample)
+        self.assertEqual(out[0], "yes")
+        self.assertEqual(out[2], "yes")
+
+    def test_unparseable_returns_error_skip(self):
+        out = self._decide("Unable to assess the situation right there.")
+        self.assertEqual(out, ["ERROR"])
+        # Caller checks output[0] == "yes"; "ERROR" cleanly means skip.
+        self.assertNotEqual(out[0], "yes")
 
 
 class TestProfiler(unittest.TestCase):

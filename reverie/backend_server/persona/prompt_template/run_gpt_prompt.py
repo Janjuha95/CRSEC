@@ -1195,7 +1195,7 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
     # Headless emoji stub (Step 1c): pronunciatio is frontend-only cosmetics,
     # so in headless runs skip the LLM call entirely. CRSEC_HEADLESS=1.
     if os.environ.get("CRSEC_HEADLESS") == "1":
-        call_profiler.incr("pronunciatio_headless_stub")
+        call_profiler.incr("pronunciatio_stub")
         return "💬", ["💬", "", None, [action_description], "💬"]
 
     cache_key = ("pronunciatio", action_description)

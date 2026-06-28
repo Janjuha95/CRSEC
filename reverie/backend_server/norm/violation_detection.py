@@ -24,8 +24,8 @@ from norm.run_gpt_prompt_norm import run_gpt_prompt_violation_check
 #   (b) keyword-stem overlap: the event description must share at least one
 #       content-word stem with the norm (built from the norm's
 #       subject/predicate/object fields, falling back to norm.content).
-# Skip counts are recorded in profile.json (counters: prefilter_skipped_benign,
-# prefilter_skipped_no_overlap, prefilter_llm_checked) to audit reach.
+# Skip counts are recorded in profile.json (counters: prefilter_skip_benign,
+# prefilter_skip_no_overlap, prefilter_llm_checked) to audit reach.
 # ----------------------------------------------------------------------------
 
 _BENIGN_PATTERNS = (
@@ -137,7 +137,7 @@ def detect_violations(observer_persona, perceived_events, personas):
 
         # Pre-filter stage (a): benign events can't violate a norm.
         if prefilter and _is_benign_event(event_desc):
-            call_profiler.incr("prefilter_skipped_benign", len(active_norms))
+            call_profiler.incr("prefilter_skip_benign", len(active_norms))
             continue
 
         event_stems = _stems(event_desc) if prefilter else None
@@ -148,7 +148,7 @@ def detect_violations(observer_persona, perceived_events, personas):
             if prefilter:
                 norm_stems = _norm_stems(norm)
                 if norm_stems and not (event_stems & norm_stems):
-                    call_profiler.incr("prefilter_skipped_no_overlap")
+                    call_profiler.incr("prefilter_skip_no_overlap")
                     continue
                 call_profiler.incr("prefilter_llm_checked")
 

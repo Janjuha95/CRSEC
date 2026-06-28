@@ -21,6 +21,52 @@ def _log_fail_safe(fn_name, fs):
         pass
 
 
+def _yn_token(seg):
+    """First standalone yes/no token in `seg`, with markdown emphasis,
+    brackets and backticks stripped first. Returns 'yes'/'no' or None."""
+    if not isinstance(seg, str):
+        return None
+    s = re.sub(r"[*`\[\]<>]", " ", _strip_scaffolding(seg)).lower()
+    m = re.search(r"\b(yes|no)\b", s)
+    return m.group(1) if m else None
+
+
+def _final_output_decision(gpt_response):
+    """Authoritatively read the model's FINAL OUTPUT line.
+
+    Handles the ways Qwen3 deviates from the GPT-4 template:
+      * reasoning preamble before the answer (uses the LAST 'final output'
+        marker, since the model often echoes the template earlier),
+      * markdown emphasis (``**No**``) and brackets (``[No]``),
+      * a missing space after the colon or the answer on the next line.
+
+    Returns 'yes', 'no', or None when no decision can be read. The earlier
+    parser split on a brittle literal prompt substring; when that substring
+    was absent (the common case with Qwen3) the split returned the WHOLE
+    response and the first yes/no token — frequently a 'yes' buried in the
+    reasoning or in the echoed ``Answer in "yes" or "no"`` instruction — was
+    taken, inverting a genuine 'No' final output into conflict=yes.
+    """
+    if not isinstance(gpt_response, str):
+        return None
+    s = _strip_scaffolding(gpt_response)
+    low = s.lower()
+    idx = low.rfind("final output")
+    if idx != -1:
+        seg = s[idx + len("final output"):].lstrip(": \t\r\n")
+        first_line = seg.split("\n")[0] if seg else ""
+        d = _yn_token(first_line)
+        if d:
+            return d
+    # No usable FINAL OUTPUT marker: scan from the bottom for the last line
+    # that actually carries a yes/no (the concluding answer).
+    for line in reversed(s.splitlines()):
+        d = _yn_token(line)
+        if d:
+            return d
+    return None
+
+
 def run_gpt_prompt_decide_if_norm_conflict(target_person_description, init_persona_norms, target_p, init_p_identity,
                                            init_p_innate, verbose=False):
     def create_prompt_input(target_person_description, init_persona_norms, target_p, init_p_identity,
@@ -33,29 +79,26 @@ def run_gpt_prompt_decide_if_norm_conflict(target_person_description, init_perso
         prompt_input += [target_p]
         return prompt_input
 
-    def _yn(seg):
-        # First word stripped of punctuation, or first yes/no token in seg.
-        seg = _strip_scaffolding(seg).strip().lower()
-        head = re.split(r"[\s,.;:!?]", seg, maxsplit=1)[0]
-        if head in ("yes", "no"):
-            return head
-        m = re.search(r"\b(yes|no)\b", seg)
-        return m.group(1) if m else None
-
     def __func_validate(gpt_response, prompt=""):
+        # Accept the response as soon as a FINAL OUTPUT decision is readable;
+        # otherwise retry (and ultimately fall back to the ['ERROR'] skip).
         try:
-            talk = _yn(gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0])
-            conf = _yn(gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[-1].split("//")[0])
-            return talk in ("yes", "no") and conf in ("yes", "no")
-        except:
+            return _final_output_decision(gpt_response) in ("yes", "no")
+        except Exception:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        talk = _yn(gpt_response.split("FINAL OUTPUT: ")[-1].split("\n")[0]) or "no"
-        conf = _yn(gpt_response.split('whether there is a conflict?\nAnswer in "yes" or "no" and provide a reason: ')[-1].split("//")[0]) or "no"
-        return [talk, gpt_response, conf]
+        # The FINAL OUTPUT line is authoritative for BOTH the conversation
+        # decision (output[0], consumed by norm_retrieve) and the logged
+        # conflict flag (output[2]): per check_conflict_decide_talk_v5 the
+        # FINAL OUTPUT is forced to 'No' whenever there is no conflict, so
+        # No -> no-conflict, Yes -> conflict.
+        decision = _final_output_decision(gpt_response) or "no"
+        return [decision, gpt_response, decision]
 
     def get_fail_safe():
+        # ['ERROR'] (length 1) is the skip sentinel: the caller checks
+        # output[0] == "yes", so "ERROR" cleanly means "no conflict, skip".
         fs = "ERROR"
         return [fs]
 
@@ -1188,6 +1231,8 @@ def run_gpt_prompt_violation_check(event_desc, norm_content, observer_name, verb
     if memoize and cache_key in _VIOLATION_CACHE:
         call_profiler.incr("violation_check_cache_hit")
         return copy.deepcopy(_VIOLATION_CACHE[cache_key])
+    if memoize:
+        call_profiler.incr("violation_check_cache_miss")
 
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 150,
                  "temperature": 0, "top_p": 1, "stream": False,

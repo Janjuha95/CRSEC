@@ -64,6 +64,11 @@ class ReverieServer:
     sim_folder = f"{fs_storage}/{self.sim_code}"
     copyanything(fork_folder, sim_folder)
 
+    # Point the LLM-call profiler at this sim's folder so its incremental
+    # flush (every N calls) and the atexit fallback land next to the final
+    # profile written by save(). See call_profiler.py.
+    call_profiler.set_dump_path(f"{sim_folder}/profile.json")
+
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
 
