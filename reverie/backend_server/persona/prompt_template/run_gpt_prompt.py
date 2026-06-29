@@ -1252,13 +1252,18 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        # GPT-4: "(predicate, object)". Qwen3 may omit parens or wrap in
-        # "Answer: (..)". Strip scaffolding and stray leading "(" before
-        # splitting.
-        cr = _strip_scaffolding(gpt_response).strip()
+        # GPT-4: "(predicate, object)". Qwen3 may omit parens, wrap in
+        # "Answer: (..)", quote elements, or append prose after "//".
+        # Strip scaffolding + outer quotes, stray leading "(", trailing prose,
+        # then element-level quotes — without loosening any other parser.
+        cr = _strip_scaffolding(gpt_response).strip().strip('"\'')
         if cr.startswith("("):
             cr = cr[1:]
-        cr = [i.strip() for i in cr.split(")")[0].split(",")]
+        cr = cr.split(")")[0]
+        for sep in (" //", " --"):
+            if sep in cr:
+                cr = cr[:cr.index(sep)]
+        cr = [i.strip().strip('"\'') for i in cr.split(",")]
         return cr
 
     def __func_validate(gpt_response, prompt=""):
@@ -1332,6 +1337,8 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
     ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
     if raw_output is not fail_safe:
         _memo_put(cache_key, ret)
+    else:
+        call_profiler.incr("event_triple_fail_safe")
     return ret
 
 

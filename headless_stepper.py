@@ -2,6 +2,7 @@ import json, os, sys, time
 
 sim = sys.argv[1]
 max_step = int(sys.argv[2]) if len(sys.argv) > 2 else 100000
+print(f"[stepper] max_step={max_step}", flush=True)
 base = f"environment/frontend_server/storage/{sim}"
 mv_dir, env_dir = f"{base}/movement", f"{base}/environment"
 

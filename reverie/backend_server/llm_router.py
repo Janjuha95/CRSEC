@@ -10,47 +10,51 @@ import ollama
 
 import call_profiler
 
-# Two-tier routing: primary handles high-volume simple calls,
-# reasoning handles critical reasoning. Both currently point at 30b-a3b
-# because the reasoning tier model (qwen3:32b dense) isn't pulled yet.
-# When you pull qwen3:32b on VSC, flip REASONING_MODEL below.
 PRIMARY_MODEL = "qwen3:30b-a3b"
-REASONING_MODEL = "qwen3:32b"  
+REASONING_MODEL = "qwen3:32b"
+SMALL_MODEL = os.environ.get("CRSEC_SMALL_MODEL", "qwen3:4b")
 
-PRIMARY_CALL_TYPES = {
-    "format_check",
-    "type_check",
-    "duplicate_check",
-    "fact_consistency",
+# ── Tier 1: cosmetic / noise-tolerant prompt functions → SMALL_MODEL ─────────
+# A/B: set CRSEC_TIERED_ROUTING=0 to route everything to REASONING_MODEL.
+SMALL_ROUTE_PROMPT_FNS = {
+    "run_gpt_prompt_pronunciatio",       # emoji cosmetics
+}
+# NOTE: run_gpt_prompt_event_triple was moved from SMALL → PRIMARY.
+# qwen3:4b mis-parsed (s,p,o); qwen3:30b-a3b handles it cleanly.
+# NOTE: the three poignancy functions were removed from small-model routing.
+# They use ChatGPT_safe_generate_response's strict {"output":<int>} envelope;
+# qwen3:4b doesn't emit that, so every call fail-safed. See PATCH_LOG Part B.
+
+# ── Tier 2: agent conversations and norm decisions → REASONING_MODEL ──────────
+# Any prompt_fn starting with "run_gpt_prompt_norm" is also routed here
+# (matched at runtime via str.startswith).
+REASONING_ROUTE_PROMPT_FNS = {
+    "run_gpt_generate_iterative_chat_utt",
+    "run_gpt_prompt_agent_chat",
+    "run_gpt_prompt_create_conversation",
+    "run_gpt_prompt_generate_next_convo_line",
+    "run_gpt_prompt_agent_chat_summarize_ideas",
+    "run_gpt_prompt_agent_chat_summarize_relationship",
+    "run_gpt_prompt_decide_if_norm_conflict",
 }
 
+# ── Tier 3: call_type-based reasoning routing (norm module direct callers) ────
 REASONING_CALL_TYPES = {
     "norm_creation",
     "norm_evaluation",
     "conflict_detection",
-    "conversation",
     "defection_assessment",
-    "violation_check",
-    "default",
 }
+# Removed from REASONING_CALL_TYPES: "conversation", "default", "violation_check".
+# "conversation" was the universal default but is high-volume bulk → PRIMARY.
+# "violation_check" is high-volume and pre-filtered anyway → PRIMARY.
 
-# Tiered routing (Step 2 of the perf pass): cosmetic / noise-tolerant prompt
-# functions go to a small model. Flag-gated; default ON. Routing is keyed on
-# the run_gpt_* caller name (also used for profiling attribution) so the
-# legacy gpt_structure wrappers don't need a call_type threaded through.
-# A/B: set CRSEC_TIERED_ROUTING=0 to restore single-model routing.
-SMALL_MODEL = os.environ.get("CRSEC_SMALL_MODEL", "qwen3:4b")
-SMALL_ROUTE_PROMPT_FNS = {
-    "run_gpt_prompt_pronunciatio",       # emoji cosmetics
-    "run_gpt_prompt_event_triple",       # (s, p, o) extraction
+# Known bulk call_types that go to PRIMARY without logging (they are intentional,
+# not unrecognized).
+_KNOWN_BULK_CALL_TYPES = {
+    "conversation", "default", "violation_check",
+    "format_check", "type_check", "duplicate_check", "fact_consistency",
 }
-# NOTE: the three poignancy functions were removed from small-model routing.
-# They go through ChatGPT_safe_generate_response, which demands a strict
-# {"output": "<int>"} JSON envelope; qwen3:4b does not reliably emit that
-# envelope, so json.loads(...)["output"] threw on every repeat and the
-# wrapper returned False -> [FAIL_SAFE] on nearly every poignancy call. The
-# larger primary model satisfies the envelope, so poignancy stays on it.
-# See PATCH_LOG.md (Part B).
 
 # Per-request Ollama options (Step 1d). The sim's determinism (and therefore
 # the memoization in run_gpt_prompt*.py) relies on temperature 0, so it is
@@ -85,13 +89,12 @@ def _caller_prompt_fn() -> str:
 
 
 def _get_model(call_type: str) -> str:
+    """Tier-3/4 fallback: resolve model from call_type alone."""
     if call_type in REASONING_CALL_TYPES:
         return REASONING_MODEL
-    if call_type in PRIMARY_CALL_TYPES:
-        return PRIMARY_MODEL
-    # Unknown call_type — default to reasoning tier to be safe, but log it.
-    print(f"[llm_router] WARNING: unknown call_type '{call_type}', defaulting to REASONING_MODEL")
-    return REASONING_MODEL
+    if call_type not in _KNOWN_BULK_CALL_TYPES:
+        print(f"[llm_router] info: call_type '{call_type}' → PRIMARY_MODEL")
+    return PRIMARY_MODEL
 
 
 def _log_call(model, call_type, prompt, response, schema_enforced, error=None):
@@ -111,23 +114,37 @@ def _log_call(model, call_type, prompt, response, schema_enforced, error=None):
 
 def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries: int = 2) -> str:
     """
-    Route a prompt to the correct Ollama model based on call_type.
+    Route a prompt to the correct Ollama model using three-tier routing.
     If json_schema is provided, it is passed as format= to enforce structured output.
     Returns the response content as a string.
+
+    Routing precedence (when CRSEC_TIERED_ROUTING != "0"):
+      1. prompt_fn in SMALL_ROUTE_PROMPT_FNS                            → SMALL_MODEL
+      2. prompt_fn in REASONING_ROUTE_PROMPT_FNS
+         or prompt_fn.startswith("run_gpt_prompt_norm")                 → REASONING_MODEL
+      3. call_type in REASONING_CALL_TYPES                              → REASONING_MODEL
+      4. else                                                            → PRIMARY_MODEL
+    When CRSEC_TIERED_ROUTING=0: everything → REASONING_MODEL (A/B baseline).
     """
     prompt_fn = _caller_prompt_fn()
 
-    model = _get_model(call_type)
-    # Tiered routing: cosmetic/noise-tolerant prompt functions go to the
-    # small model unless disabled (CRSEC_TIERED_ROUTING=0).
-    if (prompt_fn in SMALL_ROUTE_PROMPT_FNS
-            and os.environ.get("CRSEC_TIERED_ROUTING", "1") != "0"):
+    tiered = os.environ.get("CRSEC_TIERED_ROUTING", "1") != "0"
+    if not tiered:
+        model = REASONING_MODEL
+    elif prompt_fn in SMALL_ROUTE_PROMPT_FNS:
         model = SMALL_MODEL
+    elif (prompt_fn in REASONING_ROUTE_PROMPT_FNS
+          or prompt_fn.startswith("run_gpt_prompt_norm")):
+        model = REASONING_MODEL
+    else:
+        model = _get_model(call_type)
 
-    # Routing-tier attribution (A3): one counter per logical call (before the
-    # retry loop) so the small/primary split is auditable over a long run.
+    # Routing-tier attribution: one counter per logical call (before retry loop)
+    # so the three-way split is auditable over a long run.
     if model == SMALL_MODEL:
         call_profiler.incr("small_model_call")
+    elif model == REASONING_MODEL:
+        call_profiler.incr("reasoning_model_call")
     else:
         call_profiler.incr("primary_model_call")
 

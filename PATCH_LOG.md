@@ -1,5 +1,114 @@
 # PATCH_LOG — profiler wiring + two correctness regressions
 
+---
+
+## 2026-06-29 — three-tier routing, event_triple to PRIMARY, stepper banner
+
+Branch `norm_deflection`. Routing/instrumentation changes only; no validated
+success-path return value was altered. Verified with `python -m pytest tests/`
+(117 passed) from `reverie/backend_server/`.
+
+**Root cause (throughput):** every wrapper in `gpt_structure.py` calls
+`openai_compat_call(prompt, call_type="conversation")`. `"conversation"` was in
+`REASONING_CALL_TYPES`, so **all** persona work (planning, actions, poignancy,
+reflection, dialogue) routed to `qwen3:32b` (24 GB dense, slow). The intended
+fast primary `qwen3:30b-a3b` (MoE, ~3 B active params) was never loaded. Net:
+bulk ran on the slowest model — ~5–8× the per-token cost — driving ~40 s/step.
+
+### Part 1 — Three-tier name-based routing (`llm_router.py`)
+
+Replaced the two-tier call_type-only routing with a three-tier precedence keyed
+primarily on the calling `run_gpt_*` function name (same stack walk as the
+profiler, so no changes to gpt_structure wrappers):
+
+| Tier | Condition | Target |
+|------|-----------|--------|
+| 1 | `prompt_fn in SMALL_ROUTE_PROMPT_FNS` | `SMALL_MODEL` (qwen3:4b) |
+| 2 | `prompt_fn in REASONING_ROUTE_PROMPT_FNS` or `prompt_fn.startswith("run_gpt_prompt_norm")` | `REASONING_MODEL` (qwen3:32b) |
+| 3 | `call_type in REASONING_CALL_TYPES` | `REASONING_MODEL` |
+| 4 | else | `PRIMARY_MODEL` (qwen3:30b-a3b) |
+
+`SMALL_ROUTE_PROMPT_FNS = {"run_gpt_prompt_pronunciatio"}` (event_triple
+removed — see Part 2).
+
+`REASONING_ROUTE_PROMPT_FNS` = the seven conversation/norm-decision functions
+(`run_gpt_generate_iterative_chat_utt`, `run_gpt_prompt_agent_chat`,
+`run_gpt_prompt_create_conversation`, `run_gpt_prompt_generate_next_convo_line`,
+`run_gpt_prompt_agent_chat_summarize_ideas`,
+`run_gpt_prompt_agent_chat_summarize_relationship`,
+`run_gpt_prompt_decide_if_norm_conflict`). All `run_gpt_prompt_norm*` functions
+match via `startswith`.
+
+`REASONING_CALL_TYPES = {"norm_creation", "norm_evaluation",
+"conflict_detection", "defection_assessment"}`. Removed `"conversation"`,
+`"default"`, `"violation_check"` — these are high-volume bulk and belong on
+PRIMARY.
+
+`PRIMARY_CALL_TYPES` removed (dead code — no caller passed those types).
+`_get_model` fallback now returns `PRIMARY_MODEL` (not REASONING) and logs at
+`info` level only for genuinely unrecognized call_types (not for known bulk
+types like `"conversation"`).
+
+`CRSEC_TIERED_ROUTING=0` escape hatch preserved: routes everything to
+`REASONING_MODEL` to match the pre-patch baseline cleanly for A/B comparison.
+
+Added `reasoning_model_call` profiler counter so the three-way split
+(small / reasoning / primary) is auditable in `profile.json`.
+
+Live check: after this patch, `ollama ps` should show `qwen3:30b-a3b` loaded
+and serving the bulk. `profile.json → counters.primary_model_call` should
+dominate; `reasoning_model_call` only on convo/norm steps.
+
+VRAM note: 30b-a3b (~18 GB) + 32b (24 GB) + 4b (5.4 GB) + nomic (0.6 GB)
+≈ 48 GB — fits the A100-80GB with `OLLAMA_KEEP_ALIVE=24h`, no model-swap thrash.
+
+### Part 2 — `event_triple` to PRIMARY + fail-safe counter
+
+`run_gpt_prompt_event_triple` was in `SMALL_ROUTE_PROMPT_FNS` (qwen3:4b). The
+small model mis-parsed `(s, p, o)`, fail-safing to `('X', 'is', 'idle')` and
+flattening real café events in associative memory (hurts RQ2). It now hits
+PRIMARY (tier 4).
+
+- Added `call_profiler.incr("event_triple_fail_safe")` on the fail-safe branch
+  so mis-parse rate on 30b-a3b is measurable.
+- Hardened `__func_clean_up` to strip outer quotes from the whole response
+  and from each split element, and to drop trailing prose after ` //` or ` --`
+  separators. No other function's parser was touched.
+
+### Part 3 — Stepper startup banner (`headless_stepper.py`)
+
+Added `print(f"[stepper] max_step={max_step}", flush=True)` immediately after
+`max_step` is resolved. The default of 100000 was already in place (not changed).
+A mismatch between `headless_stepper.py max_step` and the step count passed to
+reverie was previously silent; it is now visible in the stepper log.
+
+### Tests (`tests/test_optimizations.py`)
+
+- `_call_via` now accepts an optional `call_type` parameter (default
+  `"conversation"`) so tier-3 routing can be exercised from a generic frame.
+- `test_reasoning_model_for_other_fns` → renamed
+  `test_primary_model_for_bulk_fns`; assertion updated from `REASONING_MODEL`
+  to `PRIMARY_MODEL` (`run_gpt_prompt_violation_check` is now tier-4 default).
+- `test_poignancy_uses_primary_model` → assertion updated from `REASONING_MODEL`
+  to `PRIMARY_MODEL` (poignancy is not in any special routing set; the
+  `call_type="conversation"` falls through to tier 4).
+- `test_three_tier_mapping` (new): asserts all five required mappings —
+  `run_gpt_prompt_daily_plan`→PRIMARY, `run_gpt_generate_iterative_chat_utt`→
+  REASONING, `run_gpt_prompt_pronunciatio`→SMALL, `call_type="norm_evaluation"`→
+  REASONING, `call_type="violation_check"`→PRIMARY.
+- `test_norm_reflect_fn_routes_to_reasoning` (new): verifies the `startswith`
+  rule for norm module callers.
+- `test_event_triple_routes_to_primary` (new): confirms event_triple left SMALL.
+
+### Files changed
+
+- `reverie/backend_server/llm_router.py` — three-tier routing, REASONING_ROUTE_PROMPT_FNS,
+  trimmed REASONING_CALL_TYPES, PRIMARY_CALL_TYPES removed, reasoning_model_call counter.
+- `reverie/backend_server/persona/prompt_template/run_gpt_prompt.py` —
+  event_triple_fail_safe counter + hardened __func_clean_up.
+- `headless_stepper.py` — max_step startup banner.
+- `reverie/backend_server/tests/test_optimizations.py` — updated + new routing tests.
+
 Branch: `norm_deflection`. Instrumentation + targeted fixes only; no
 architectural changes. All work verified with `python -m pytest tests/`
 (114 passed) from `reverie/backend_server/`.

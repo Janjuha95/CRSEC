@@ -358,8 +358,8 @@ class TestViolationPrefilter(EnvMixin, unittest.TestCase):
 
 
 class TestTieredRouting(EnvMixin, unittest.TestCase):
-    def _call_via(self, fn_name):
-        """Invoke llm_call from a frame named fn_name; return model used."""
+    def _call_via(self, fn_name, call_type="conversation"):
+        """Invoke llm_call from a frame named fn_name; return model kwargs used."""
         captured = {}
 
         def fake_chat(**kwargs):
@@ -368,7 +368,7 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
 
         wrapper_code = compile(
             f"def {fn_name}():\n"
-            f"    return llm_router.llm_call('p', 'conversation')\n",
+            f"    return llm_router.llm_call('p', {call_type!r})\n",
             "<test>", "exec")
         ns = {"llm_router": llm_router}
         exec(wrapper_code, ns)
@@ -382,22 +382,23 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
         kwargs = self._call_via("run_gpt_prompt_pronunciatio")
         self.assertEqual(kwargs["model"], llm_router.SMALL_MODEL)
 
-    def test_reasoning_model_for_other_fns(self):
+    def test_primary_model_for_bulk_fns(self):
+        """Bulk functions not in SMALL or REASONING sets default to PRIMARY_MODEL."""
         self.setenv("CRSEC_TIERED_ROUTING", "1")
         kwargs = self._call_via("run_gpt_prompt_violation_check")
-        self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
+        self.assertEqual(kwargs["model"], llm_router.PRIMARY_MODEL)
 
     def test_poignancy_uses_primary_model(self):
-        """Part B regression: poignancy must NOT route to the small model even
-        with tiered routing on (qwen3:4b can't satisfy the strict JSON
-        envelope of ChatGPT_safe_generate_response)."""
+        """Poignancy must NOT go to SMALL (qwen3:4b fails the strict JSON
+        envelope) and is not in REASONING_ROUTE_PROMPT_FNS, so it goes to
+        PRIMARY_MODEL (tier 4 default with call_type='conversation')."""
         self.setenv("CRSEC_TIERED_ROUTING", "1")
         for fn in ("run_gpt_prompt_event_poignancy",
                    "run_gpt_prompt_thought_poignancy",
                    "run_gpt_prompt_chat_poignancy"):
             kwargs = self._call_via(fn)
-            self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL,
-                             f"{fn} should route to the primary model")
+            self.assertEqual(kwargs["model"], llm_router.PRIMARY_MODEL,
+                             f"{fn} should route to PRIMARY_MODEL")
 
     def test_tiered_routing_disabled(self):
         self.setenv("CRSEC_TIERED_ROUTING", "0")
@@ -409,6 +410,42 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
         self.assertEqual(kwargs["options"]["temperature"], 0.0)
         self.assertEqual(kwargs["options"]["num_ctx"], llm_router.OLLAMA_NUM_CTX)
         self.assertFalse(kwargs["think"])
+
+    def test_three_tier_mapping(self):
+        """Consolidated: verify the five required routing assertions end-to-end."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        # run_gpt_prompt_daily_plan → tier 4 default → PRIMARY
+        self.assertEqual(
+            self._call_via("run_gpt_prompt_daily_plan")["model"],
+            llm_router.PRIMARY_MODEL)
+        # run_gpt_generate_iterative_chat_utt → tier 2 REASONING_ROUTE_PROMPT_FNS → REASONING
+        self.assertEqual(
+            self._call_via("run_gpt_generate_iterative_chat_utt")["model"],
+            llm_router.REASONING_MODEL)
+        # run_gpt_prompt_pronunciatio → tier 1 SMALL_ROUTE_PROMPT_FNS → SMALL
+        self.assertEqual(
+            self._call_via("run_gpt_prompt_pronunciatio")["model"],
+            llm_router.SMALL_MODEL)
+        # call_type="norm_evaluation" from generic frame → tier 3 REASONING_CALL_TYPES → REASONING
+        self.assertEqual(
+            self._call_via("run_gpt_prompt_generic", call_type="norm_evaluation")["model"],
+            llm_router.REASONING_MODEL)
+        # call_type="violation_check" from generic frame → tier 4 → PRIMARY
+        self.assertEqual(
+            self._call_via("run_gpt_prompt_generic", call_type="violation_check")["model"],
+            llm_router.PRIMARY_MODEL)
+
+    def test_norm_reflect_fn_routes_to_reasoning(self):
+        """Functions starting with run_gpt_prompt_norm hit REASONING via startswith."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        kwargs = self._call_via("run_gpt_prompt_norm_reflect_from_thoughts")
+        self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
+
+    def test_event_triple_routes_to_primary(self):
+        """run_gpt_prompt_event_triple was moved from SMALL to PRIMARY."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        kwargs = self._call_via("run_gpt_prompt_event_triple")
+        self.assertEqual(kwargs["model"], llm_router.PRIMARY_MODEL)
 
 
 class TestConflictParserUnit(unittest.TestCase):
