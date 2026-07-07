@@ -17,7 +17,7 @@ dialogue-JSON) parsed cleanly with `done_reason != "length"` (run on
 ### Change 1 — Output-token caps (`llm_router.py`)
 
 `llm_call()` previously set only `temperature`/`num_ctx`; classifier-style
-calls could ramble unboundedly. Added `PROMPT_FN_NUM_PREDICT` (61 fns, keyed
+calls could ramble unboundedly. Added `PROMPT_FN_NUM_PREDICT` (60 fns, keyed
 by the same names `_caller_prompt_fn()` returns) wired into
 `kwargs["options"]["num_predict"]`. `llm_logs/calls.jsonl` had no `prompt_fn`
 field (114 smoke-test rows on `qwen3:8b`), so caps come from static tiers
