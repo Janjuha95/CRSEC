@@ -10,9 +10,9 @@ import ollama
 
 import call_profiler
 
-PRIMARY_MODEL = "qwen3:30b-a3b"
+PRIMARY_MODEL = "qwen3:30b-instruct"
 REASONING_MODEL = "qwen3:32b"
-SMALL_MODEL = os.environ.get("CRSEC_SMALL_MODEL", "qwen3:4b")
+SMALL_MODEL = os.environ.get("CRSEC_SMALL_MODEL", "qwen3:4b-instruct")
 
 # ── Tier 1: cosmetic / noise-tolerant prompt functions → SMALL_MODEL ─────────
 # A/B: set CRSEC_TIERED_ROUTING=0 to route everything to REASONING_MODEL.
@@ -252,7 +252,7 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
 
     messages = [
         {"role": "system", "content": NO_THINK_SYSTEM},
-        {"role": "user", "content": prompt + "\n/no_think"},
+        {"role": "user", "content": prompt},
     ]
 
     kwargs = {
@@ -266,6 +266,12 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
     if NUM_PREDICT_ENABLED:
         kwargs["options"]["num_predict"] = PROMPT_FN_NUM_PREDICT.get(
             prompt_fn, NUM_PREDICT_DEFAULT)
+    if model == REASONING_MODEL:
+        # qwen3:32b is an original hybrid: think=False cleanly disables thinking.
+        # NEVER send think to instruct-2507 (unsupported) and never think=False
+        # to thinking-2507 builds (leaks reasoning into content).
+        kwargs["think"] = False
+
     if json_schema is not None:
         kwargs["format"] = json_schema
 
