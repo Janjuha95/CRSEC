@@ -2,6 +2,102 @@
 
 ---
 
+## 2026-07-08 — num_predict caps, per-convo relationship cache, summarize routing, retry instrumentation
+
+Branch `norm_deflection`, on top of `5b581e1`. Perf pass: generation-token
+caps at the router choke point, hoisting a per-utterance 32b call out of the
+conversation loop, moving two summarize fns off the 32b, and making
+retry burn in the safe_generate wrappers visible. Every behavior change has an
+env kill-switch defaulting to the new behavior. All touched files pass
+`python -m py_compile`; 3 canary `llm_call()`s (int-score, yes/no,
+dialogue-JSON) parsed cleanly with `done_reason != "length"` (run on
+`qwen3:32b` via `CRSEC_TIERED_ROUTING=0` — this machine does not have
+`qwen3:30b-a3b`/`qwen3:4b` pulled).
+
+### Change 1 — Output-token caps (`llm_router.py`)
+
+`llm_call()` previously set only `temperature`/`num_ctx`; classifier-style
+calls could ramble unboundedly. Added `PROMPT_FN_NUM_PREDICT` (61 fns, keyed
+by the same names `_caller_prompt_fn()` returns) wired into
+`kwargs["options"]["num_predict"]`. `llm_logs/calls.jsonl` had no `prompt_fn`
+field (114 smoke-test rows on `qwen3:8b`), so caps come from static tiers
+cross-checked against each parser's contract + legacy `gpt_param` max_tokens:
+32 for bare int/yes-no/option (poignancy ×3, decide_to_talk/react,
+wake_up_hour, safety_score, duplicate_check, pronunciatio), 64 triples/names,
+128 one-liners, 256 summaries/structured norm checks, 512 dialogue JSON,
+768 norm creation/format/synthesis + `decide_if_norm_conflict`, 1024
+insight_and_guidance, 2048 planning/decomp.
+
+Deviations from the prompt's static tiers, from parser evidence:
+`violation_check` 32→128 (4-key JSON), `seeds_content_check`/
+`seeds_type_check(_v2)`/`fact_consistency_check` 32→256 (multi-segment
+answers), pronunciatio 16→32 (floor), `decide_if_norm_conflict` →768: its
+template demands 3× step-by-step reasoning before FINAL OUTPUT and
+`_final_output_decision`'s bottom-scan fallback means truncation could
+silently invert the decision rather than fail.
+
+Truncation tripwire: `done_reason == "length"` →
+`call_profiler.incr(f"truncated_{prompt_fn}")` + `_log_call` error field. A
+too-tight cap causes parse-fail → repeat-loop re-fire (slower, not faster);
+nonzero `truncated_*` counters in calib_006 are the signal to raise a cap.
+
+Flags: `CRSEC_NUM_PREDICT=0` disables all caps; `CRSEC_NUM_PREDICT_DEFAULT`
+(default 1024) for unlisted fns and `prompt_fn=="unknown"` direct callers
+(defection_engine, creation.py, SpecificNormUtility).
+
+### Change 2 — Per-conversation relationship cache (`converse.py`)
+
+`agent_chat_v2` recomputed `generate_summarize_agent_relationship` (a 32b call
+until Change 3, now PRIMARY) plus a 50-node `new_retrieve` on **every**
+utterance — up to 10× per conversation for a quantity that cannot change
+mid-conversation. Both directions are now computed once before the loop and
+reused; the per-turn 15-node retrieve with `last_chat` is untouched.
+`relationship_cache_hit` increments per in-loop use (hits ≈ utterances;
+LLM calls saved ≈ hits − 2). Note: a conversation ending after 1 utterance now
+costs 2 relationship calls instead of 1; break-even at 2, win from 3 on.
+Flag: `CRSEC_RELATIONSHIP_CACHE=0` restores per-utterance recomputation.
+
+### Change 3 — Summarize fns to PRIMARY (`llm_router.py`)
+
+`run_gpt_prompt_agent_chat_summarize_ideas` and
+`run_gpt_prompt_agent_chat_summarize_relationship` removed from
+`REASONING_ROUTE_PROMPT_FNS` → fall through to `qwen3:30b-a3b`. They are
+recall aids, not decisions. Spoken-line generators,
+`run_gpt_prompt_decide_if_norm_conflict`, and all `run_gpt_prompt_norm*` stay
+on the 32b. Tier comments updated.
+Flag: `CRSEC_SUMMARIZE_ON_REASONING=1` re-adds both to the reasoning set.
+
+### Change 4 — Retry-burn instrumentation (`gpt_structure.py`)
+
+The `_OLD`/`_t0`/`_t1` wrapper variants turned out to be the live workhorses
+(every norm fn + several persona fns call them), so all seven repeat loops are
+instrumented: `retry_{fn}` on each failed iteration, `fail_safe_{fn}` on
+exhaustion, with `fn` resolved lazily via `llm_router._caller_prompt_fn()`
+(stack walk only on the failure path; helpers `_count_retry`/
+`_count_fail_safe`). `compress_sim_storage_norm.py`'s private wrapper copy is
+an offline tool and was left alone. **The retry audit + parser fixes (4b/4c)
+were skipped: `calib_005.log` and `calib_005/profile.json` are absent on this
+machine.** The calib_006 `retry_*`/`fail_safe_*` ranking is the input for that
+follow-up.
+
+### What to watch in calib_006
+
+- `sec/step` vs calib_005 (expect a drop from caps + cache + routing).
+- `truncated_*` counters ≈ 0; any nonzero one names the fn whose cap to raise.
+- `retry_*` ranking → the 4c parser-fix shortlist.
+- `relationship_cache_hit` ≈ total utterances across conversations.
+
+### Files changed
+
+- `reverie/backend_server/llm_router.py` — cap table + wiring, tripwire,
+  summarize fns off reasoning set.
+- `reverie/backend_server/persona/cognitive_modules/converse.py` — hoisted
+  relationship summaries in `agent_chat_v2`.
+- `reverie/backend_server/persona/prompt_template/gpt_structure.py` —
+  retry/fail-safe counters in all seven safe_generate wrappers.
+
+---
+
 ## 2026-06-29 — three-tier routing, event_triple to PRIMARY, stepper banner
 
 Branch `norm_deflection`. Routing/instrumentation changes only; no validated

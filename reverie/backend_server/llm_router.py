@@ -28,15 +28,22 @@ SMALL_ROUTE_PROMPT_FNS = {
 # ── Tier 2: agent conversations and norm decisions → REASONING_MODEL ──────────
 # Any prompt_fn starting with "run_gpt_prompt_norm" is also routed here
 # (matched at runtime via str.startswith).
+# Spoken-line generators and norm-conflict decisions stay on the 32b; the two
+# agent-chat summarize fns were moved to PRIMARY — they are recall aids, not
+# decisions, and they fire up to 10x per conversation. Set
+# CRSEC_SUMMARIZE_ON_REASONING=1 to put them back on the 32b.
 REASONING_ROUTE_PROMPT_FNS = {
     "run_gpt_generate_iterative_chat_utt",
     "run_gpt_prompt_agent_chat",
     "run_gpt_prompt_create_conversation",
     "run_gpt_prompt_generate_next_convo_line",
-    "run_gpt_prompt_agent_chat_summarize_ideas",
-    "run_gpt_prompt_agent_chat_summarize_relationship",
     "run_gpt_prompt_decide_if_norm_conflict",
 }
+if os.environ.get("CRSEC_SUMMARIZE_ON_REASONING", "0") == "1":
+    REASONING_ROUTE_PROMPT_FNS |= {
+        "run_gpt_prompt_agent_chat_summarize_ideas",
+        "run_gpt_prompt_agent_chat_summarize_relationship",
+    }
 
 # ── Tier 3: call_type-based reasoning routing (norm module direct callers) ────
 REASONING_CALL_TYPES = {
@@ -66,6 +73,101 @@ OLLAMA_TEMPERATURE = float(os.environ.get("CRSEC_TEMPERATURE", "0"))
 # Qwen3 enters thinking mode by default. /no_think disables it via the
 # system prompt; think=False on the API call is the belt-and-suspenders.
 NO_THINK_SYSTEM = "/no_think"
+
+# ── Output-token caps (num_predict), keyed by prompt_fn ──────────────────────
+# Generation tokens dominate wall time, and without num_predict a
+# classifier-style call can ramble unboundedly. Caps are sized from each fn's
+# parser contract (what the validate/clean_up pair actually needs to see) plus
+# the legacy gpt_param max_tokens as intent evidence — llm_logs/calls.jsonl
+# has no prompt_fn field, so data-derived p99 caps were not possible.
+# Floor is 32: Qwen3 may spend a few tokens on an empty <think></think>
+# preamble even with think=False.
+# A too-tight cap is WORSE than none: truncation → parse failure → the
+# safe_generate repeat loop re-fires the call 3-5x. The done_reason=="length"
+# tripwire below (truncated_* counters) is how a bad cap shows up in the next
+# calibration run.
+# Kill-switch: CRSEC_NUM_PREDICT=0 disables all caps.
+# Unlisted fns (incl. prompt_fn=="unknown" from direct llm_call callers such
+# as defection_engine/creation.py) get CRSEC_NUM_PREDICT_DEFAULT.
+PROMPT_FN_NUM_PREDICT = {
+    # -- int-score / yes-no / option pickers (bare token + slack) --
+    "run_gpt_prompt_event_poignancy": 32,
+    "run_gpt_prompt_thought_poignancy": 32,
+    "run_gpt_prompt_chat_poignancy": 32,
+    "run_gpt_prompt_decide_to_talk": 32,
+    "run_gpt_prompt_decide_to_react": 32,
+    "run_gpt_prompt_wake_up_hour": 32,
+    "run_gpt_generate_safety_score": 32,       # strict {"output": N} json
+    "run_gpt_norm_duplicate_check": 32,        # template: ONLY "YES"/"NO"
+    "run_gpt_prompt_pronunciatio": 32,         # emoji; 16 would breach the floor
+    # -- event triples "(s, p, o)" --
+    "run_gpt_prompt_event_triple": 64,
+    "run_gpt_prompt_act_obj_event_triple": 64,
+    # -- short names / phrases --
+    "run_gpt_prompt_action_sector": 64,
+    "run_gpt_prompt_action_arena": 64,
+    "run_gpt_prompt_action_game_object": 64,
+    "run_gpt_prompt_act_obj_desc": 64,
+    # -- one-liners (legacy max_tokens 40-50) --
+    "run_gpt_prompt_summarize_conversation": 128,
+    "run_gpt_prompt_extract_keywords": 128,
+    "run_gpt_prompt_keyword_to_thoughts": 128,
+    "run_gpt_prompt_convo_to_thoughts": 128,
+    "run_gpt_prompt_generate_whisper_inner_thought": 128,
+    "run_gpt_prompt_planning_thought_on_convo": 128,
+    "run_gpt_prompt_memo_on_convo": 128,
+    "run_gpt_prompt_generate_hourly_schedule": 128,  # single schedule entry, not a full plan
+    # -- yes/no WITH required reasoning or structured segments; capping at 32
+    #    would truncate before the parser's markers appear --
+    "run_gpt_prompt_violation_check": 128,     # 4-key json {violation,severity,certainty,response}
+    "run_gpt_norm_recognize_conflict_check": 128,   # "Answer: yes" + short reason
+    "run_gpt_seeds_content_check": 256,        # Answer 1###/Answer 2###/STAGE 1 segments
+    "run_gpt_seeds_type_check": 256,           # OUTPUT + type-classification echo
+    "run_gpt_seeds_type_check_v2": 256,        # STEP 1/STEP 2/type lines
+    "run_gpt_norm_fact_consistency_check": 256,  # Answer + full "New norm:" text
+    "run_gpt_norm_recognize": 256,             # Answer 1..4 lines
+    "run_gpt_immediate_evaluate_recognization": 256,  # NORM UTILITY + ANSWER lines
+    "run_gpt_norm_utility": 256,               # "OUTPUT: N. <reason>" (reason is consumed)
+    "run_gpt_long_term_norm_utility": 256,     # FINAL SCORE + rationale
+    # -- summaries --
+    "run_gpt_prompt_agent_chat_summarize_ideas": 256,
+    "run_gpt_prompt_agent_chat_summarize_relationship": 256,
+    "run_gpt_prompt_summarize_ideas": 256,
+    "run_gpt_chat_norms_summarize": 256,
+    "run_gpt_conflict_chat_reflect": 256,
+    "run_gpt_non_norm_conflict_chat_reflect": 256,
+    "run_gpt_prompt_focal_pt": 256,
+    "run_gpt_active_norms_classfication": 256,
+    "run_gpt_revise_identity_plan": 256,
+    "run_gpt_revise_identity_thought": 256,
+    "run_gpt_revise_identity_currently": 256,
+    "run_gpt_revise_identity_daily_plan_req": 256,
+    # -- dialogue json --
+    "run_gpt_generate_iterative_chat_utt": 512,
+    "run_gpt_prompt_agent_chat": 512,
+    "run_gpt_prompt_create_conversation": 512,
+    "run_gpt_prompt_generate_next_convo_line": 512,
+    "run_gpt_active_norms_classfication_v2": 512,  # free-form, passed through raw
+    # -- norm creation / format / long-term synthesis --
+    "run_gpt_prompt_norm_reflect_from_thoughts": 768,
+    "run_gpt_prompt_norm_format": 768,
+    "run_gpt_norm_long_term_synthesis": 768,
+    # check_conflict_decide_talk_v5 demands step-by-step reasoning for three
+    # questions before FINAL OUTPUT, and _final_output_decision's fallback
+    # bottom-scans for any yes/no — a truncated response could silently invert
+    # the decision instead of failing. Keep this one roomy.
+    "run_gpt_prompt_decide_if_norm_conflict": 768,
+    # -- planning / schedule / decomposition --
+    "run_gpt_prompt_daily_plan": 2048,
+    "run_gpt_prompt_daily_plan_v2": 2048,
+    "run_gpt_prompt_task_decomp": 2048,
+    "run_gpt_prompt_task_decomp_v2": 2048,
+    "run_gpt_prompt_new_decomp_schedule": 2048,
+    "run_gpt_prompt_insight_and_guidance": 1024,  # n insights + evidence (legacy 1500)
+}
+
+NUM_PREDICT_ENABLED = os.environ.get("CRSEC_NUM_PREDICT", "1") != "0"
+NUM_PREDICT_DEFAULT = int(os.environ.get("CRSEC_NUM_PREDICT_DEFAULT", "1024"))
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "llm_logs")
 LOG_FILE = os.path.join(LOG_DIR, "calls.jsonl")
@@ -162,6 +264,9 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
             "num_ctx": OLLAMA_NUM_CTX,
         },
     }
+    if NUM_PREDICT_ENABLED:
+        kwargs["options"]["num_predict"] = PROMPT_FN_NUM_PREDICT.get(
+            prompt_fn, NUM_PREDICT_DEFAULT)
     if json_schema is not None:
         kwargs["format"] = json_schema
 
@@ -172,7 +277,21 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
             result = ollama.chat(**kwargs)
             content = result["message"]["content"]
             call_profiler.record_call(prompt_fn, time.perf_counter() - start)
-            _log_call(model, call_type, prompt, content, json_schema is not None)
+            # Truncation tripwire: a response cut off by num_predict will
+            # usually fail its parser and get re-fired by the safe_generate
+            # repeat loop — i.e. a too-tight cap makes things SLOWER. The
+            # truncated_* counters are how that shows up in the next
+            # calibration run's profile.json.
+            truncated = None
+            try:
+                if result.get("done_reason") == "length":
+                    call_profiler.incr(f"truncated_{prompt_fn}")
+                    truncated = ("truncated: done_reason=length "
+                                 f"(num_predict={kwargs['options'].get('num_predict')})")
+            except Exception:
+                pass
+            _log_call(model, call_type, prompt, content, json_schema is not None,
+                      error=truncated)
             return content
         except Exception as e:
             call_profiler.record_call(prompt_fn, time.perf_counter() - start)

@@ -11,7 +11,26 @@ import time
 import inspect
 
 from utils import *
-from llm_router import openai_compat_call
+import call_profiler
+from llm_router import openai_compat_call, _caller_prompt_fn
+
+
+def _count_retry(retry_fn):
+    """Count one failed safe_generate iteration against the calling
+    run_gpt_* function. Resolves the caller name lazily (stack walk only on
+    the failure path) and returns it so subsequent iterations reuse it.
+    Every still-broken parser multiplies its own LLM cost by its repeat
+    budget; the retry_* / fail_safe_* counters make that burn visible in
+    profile.json."""
+    if retry_fn is None:
+        retry_fn = _caller_prompt_fn()
+    call_profiler.incr(f"retry_{retry_fn}")
+    return retry_fn
+
+
+def _count_fail_safe(retry_fn):
+    """Count one exhausted safe_generate loop (all repeats failed)."""
+    call_profiler.incr(f"fail_safe_{retry_fn or _caller_prompt_fn()}")
 
 
 def _log_fail_safe_trigger(fs):
@@ -204,25 +223,28 @@ def GPT4_safe_generate_response(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
+  retry_fn = None
+  for i in range(repeat):
 
-    try: 
+    try:
       curr_gpt_response = GPT4_request(prompt).strip()
       end_index = curr_gpt_response.rfind('}') + 1
       curr_gpt_response = curr_gpt_response[:end_index]
       curr_gpt_response = json.loads(curr_gpt_response)["output"]
-      
-      if func_validate(curr_gpt_response, prompt=prompt): 
+
+      if func_validate(curr_gpt_response, prompt=prompt):
         return func_clean_up(curr_gpt_response, prompt=prompt)
-      
-      if verbose: 
+
+      if verbose:
         print ("---- repeat count: \n", i, curr_gpt_response)
         print (curr_gpt_response)
         print ("~~~~")
 
-    except: 
+    except:
       pass
+    retry_fn = _count_retry(retry_fn)
 
+  _count_fail_safe(retry_fn)
   return False
 
 
@@ -244,7 +266,8 @@ def ChatGPT_safe_generate_response(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
+  retry_fn = None
+  for i in range(repeat):
 
     try:
       curr_gpt_response = ChatGPT_request(prompt).strip()
@@ -275,7 +298,9 @@ def ChatGPT_safe_generate_response(prompt,
 
     except:
       pass
+    retry_fn = _count_retry(retry_fn)
 
+  _count_fail_safe(retry_fn)
   return False
 
 
@@ -289,19 +314,22 @@ def ChatGPT_safe_generate_response_OLD(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
-    try: 
+  retry_fn = None
+  for i in range(repeat):
+    try:
       curr_gpt_response = ChatGPT_request(prompt).strip()
-      if func_validate(curr_gpt_response, prompt=prompt): 
+      if func_validate(curr_gpt_response, prompt=prompt):
         return func_clean_up(curr_gpt_response, prompt=prompt)
-      if verbose: 
+      if verbose:
         print (f"---- repeat count: {i}")
         print (curr_gpt_response)
         print ("~~~~")
 
-    except: 
+    except:
       pass
+    retry_fn = _count_retry(retry_fn)
   print ("FAIL SAFE TRIGGERED")
+  _count_fail_safe(retry_fn)
   _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
@@ -368,6 +396,7 @@ def safe_generate_response(prompt,
   if verbose: 
     print (prompt)
 
+  retry_fn = None
   for i in range(repeat):
     curr_gpt_response = GPT_request(prompt, gpt_parameter)
     if func_validate(curr_gpt_response, prompt=prompt):
@@ -376,6 +405,8 @@ def safe_generate_response(prompt,
       print ("---- repeat count: ", i, curr_gpt_response)
       print (curr_gpt_response)
       print ("~~~~")
+    retry_fn = _count_retry(retry_fn)
+  _count_fail_safe(retry_fn)
   _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
@@ -429,6 +460,7 @@ def GPT4_safe_generate_response_OLD(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = GPT4_request(prompt)  # .strip()
@@ -441,7 +473,9 @@ def GPT4_safe_generate_response_OLD(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
     _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
@@ -475,6 +509,7 @@ def GPT4_safe_generate_response_OLD_t1(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = GPT4_request_t1(prompt)  # .strip()
@@ -487,7 +522,9 @@ def GPT4_safe_generate_response_OLD_t1(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
     _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
@@ -521,6 +558,7 @@ def ChatGPT_safe_generate_response_OLD_t0(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = ChatGPT_request_t0(prompt)  # .strip()
@@ -533,7 +571,9 @@ def ChatGPT_safe_generate_response_OLD_t0(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
     _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 

@@ -5,11 +5,13 @@ File: converse.py
 Description: An extra cognitive module for generating conversations. 
 """
 import math
+import os
 import sys
 import datetime
 import random
 sys.path.append('../')
 
+import call_profiler
 from global_methods import *
 
 from persona.memory_structures.spatial_memory import *
@@ -123,14 +125,30 @@ def generate_one_utterance(maze, init_persona, target_persona, retrieved, curr_c
 
   return x["utterance"], x["end"]
 
-def agent_chat_v2(maze, init_persona, target_persona, norm_conf_res): 
+def agent_chat_v2(maze, init_persona, target_persona, norm_conf_res):
   curr_chat = []
   print ("July 23")
 
-  for i in range(5): 
-    focal_points = [f"{target_persona.scratch.name}"]
-    retrieved = new_retrieve(init_persona, focal_points, 50)
-    relationship = generate_summarize_agent_relationship(init_persona, target_persona, retrieved)
+  # The relationship between the two personas does not change mid-conversation,
+  # so compute each direction's summary (and its 50-node retrieve) once here
+  # instead of on every utterance — up to 10x per conversation otherwise.
+  # CRSEC_RELATIONSHIP_CACHE=0 restores the per-utterance recomputation.
+  use_rel_cache = os.environ.get("CRSEC_RELATIONSHIP_CACHE", "1") != "0"
+  rel_cache = {}
+  if use_rel_cache:
+    for p_1, p_2 in ((init_persona, target_persona), (target_persona, init_persona)):
+      focal_points = [f"{p_2.scratch.name}"]
+      retrieved = new_retrieve(p_1, focal_points, 50)
+      rel_cache[p_1.scratch.name] = generate_summarize_agent_relationship(p_1, p_2, retrieved)
+
+  for i in range(5):
+    if use_rel_cache:
+      relationship = rel_cache[init_persona.scratch.name]
+      call_profiler.incr("relationship_cache_hit")
+    else:
+      focal_points = [f"{target_persona.scratch.name}"]
+      retrieved = new_retrieve(init_persona, focal_points, 50)
+      relationship = generate_summarize_agent_relationship(init_persona, target_persona, retrieved)
     print ("-------- relationshopadsjfhkalsdjf", relationship)
     last_chat = ""
     for i in curr_chat[-4:]:
@@ -150,9 +168,13 @@ def agent_chat_v2(maze, init_persona, target_persona, norm_conf_res):
       break
 
 
-    focal_points = [f"{init_persona.scratch.name}"]
-    retrieved = new_retrieve(target_persona, focal_points, 50)
-    relationship = generate_summarize_agent_relationship(target_persona, init_persona, retrieved)
+    if use_rel_cache:
+      relationship = rel_cache[target_persona.scratch.name]
+      call_profiler.incr("relationship_cache_hit")
+    else:
+      focal_points = [f"{init_persona.scratch.name}"]
+      retrieved = new_retrieve(target_persona, focal_points, 50)
+      relationship = generate_summarize_agent_relationship(target_persona, init_persona, retrieved)
     print ("-------- relationshopadsjfhkalsdjf", relationship)
     last_chat = ""
     for i in curr_chat[-4:]:
