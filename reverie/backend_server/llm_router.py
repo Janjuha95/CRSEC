@@ -252,13 +252,12 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
 
     messages = [
         {"role": "system", "content": NO_THINK_SYSTEM},
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": prompt + "\n/no_think"},
     ]
 
     kwargs = {
         "model": model,
         "messages": messages,
-        "think": False,
         "options": {
             "temperature": OLLAMA_TEMPERATURE,
             "num_ctx": OLLAMA_NUM_CTX,
