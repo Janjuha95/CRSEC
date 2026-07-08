@@ -435,11 +435,32 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
             self._call_via("run_gpt_prompt_generic", call_type="violation_check")["model"],
             llm_router.PRIMARY_MODEL)
 
-    def test_norm_reflect_fn_routes_to_reasoning(self):
-        """Functions starting with run_gpt_prompt_norm hit REASONING via startswith."""
+    def test_norm_prefix_fn_routes_to_reasoning(self):
+        """Functions starting with run_gpt_prompt_norm hit REASONING via
+        startswith — unless they are in NORM_PRIMARY_OVERRIDE_FNS."""
         self.setenv("CRSEC_TIERED_ROUTING", "1")
-        kwargs = self._call_via("run_gpt_prompt_norm_reflect_from_thoughts")
+        kwargs = self._call_via("run_gpt_prompt_norm_format")
         self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
+
+    def test_norm_on_primary_default(self):
+        """CRSEC_NORM_ON_PRIMARY defaults on: the two dominant norm fns go to
+        PRIMARY, checked before the tier-2 set / norm prefix rule."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        for fn in ("run_gpt_prompt_decide_if_norm_conflict",
+                   "run_gpt_prompt_norm_reflect_from_thoughts"):
+            self.assertEqual(self._call_via(fn)["model"],
+                             llm_router.PRIMARY_MODEL,
+                             f"{fn} should route to PRIMARY_MODEL by default")
+
+    def test_norm_on_primary_disabled_restores_reasoning(self):
+        """CRSEC_NORM_ON_PRIMARY=0 restores the previous 32b routing exactly."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        self.setenv("CRSEC_NORM_ON_PRIMARY", "0")
+        for fn in ("run_gpt_prompt_decide_if_norm_conflict",
+                   "run_gpt_prompt_norm_reflect_from_thoughts"):
+            self.assertEqual(self._call_via(fn)["model"],
+                             llm_router.REASONING_MODEL,
+                             f"{fn} should route to REASONING_MODEL with flag=0")
 
     def test_event_triple_routes_to_primary(self):
         """run_gpt_prompt_event_triple was moved from SMALL to PRIMARY."""

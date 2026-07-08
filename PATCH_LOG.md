@@ -582,3 +582,28 @@ No prompt template was changed. `_strip_scaffolding` itself was NOT modified
 Full test suite: 116 passed, 1 deselected (`test_options_pin_temperature_and_num_ctx`
 — pre-existing failure introduced by `462a1a6`'s think-block change, fails on a
 clean checkout too; not touched here as the think block is validated behavior).
+
+### Change B — dominant norm fns to PRIMARY behind `CRSEC_NORM_ON_PRIMARY` (`llm_router.py`)
+
+calib_008: `decide_if_norm_conflict` 264x/2,297s + `norm_reflect_from_thoughts`
+71x/1,548s = 3,845s of 7,661s total LLM time (50.2%), both on the dense 32b.
+New flag `CRSEC_NORM_ON_PRIMARY` (default "1", read at call time like
+CRSEC_TIERED_ROUTING): routes exactly these two fns to PRIMARY_MODEL via
+`NORM_PRIMARY_OVERRIDE_FNS`, checked AFTER the SMALL tier but BEFORE both the
+tier-2 REASONING set (which contains decide_if_norm_conflict) and the
+`startswith("run_gpt_prompt_norm")` prefix rule (which catches
+norm_reflect_from_thoughts). All other norm_* fns stay on the 32b. Flag "0"
+restores the previous routing exactly (covered by unit tests:
+`test_norm_on_primary_default`, `test_norm_on_primary_disabled_restores_reasoning`;
+the old `test_norm_reflect_fn_routes_to_reasoning` now checks the prefix rule
+via norm_format instead).
+
+Live-parse sanity DEFERRED to the cluster: this dev machine has only
+qwen3:8b/qwen3:32b pulled (no `qwen3:30b-instruct`), so the "run one
+representative prompt of each through PRIMARY and eyeball the parse" check
+cannot run here — same limitation as the previous pass's canaries. Watch
+`retry_run_gpt_prompt_decide_if_norm_conflict` / `retry_..._norm_reflect_from_thoughts`
+in calib_009's profile.json: if the 30b's output format breaks
+`_final_output_decision` (bottom-scan, unchanged) or the strict
+"- Norm: ... Related thought: ..." reflect parser, retries will show it
+immediately, and CRSEC_NORM_ON_PRIMARY=0 is the rollback.

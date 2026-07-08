@@ -28,10 +28,10 @@ SMALL_ROUTE_PROMPT_FNS = {
 # ── Tier 2: agent conversations and norm decisions → REASONING_MODEL ──────────
 # Any prompt_fn starting with "run_gpt_prompt_norm" is also routed here
 # (matched at runtime via str.startswith).
-# Spoken-line generators and norm-conflict decisions stay on the 32b; the two
-# agent-chat summarize fns were moved to PRIMARY — they are recall aids, not
-# decisions, and they fire up to 10x per conversation. Set
-# CRSEC_SUMMARIZE_ON_REASONING=1 to put them back on the 32b.
+# Spoken-line generators stay on the 32b; the two agent-chat summarize fns
+# were moved to PRIMARY — they are recall aids, not decisions, and they fire
+# up to 10x per conversation. Set CRSEC_SUMMARIZE_ON_REASONING=1 to put them
+# back on the 32b.
 REASONING_ROUTE_PROMPT_FNS = {
     "run_gpt_generate_iterative_chat_utt",
     "run_gpt_prompt_agent_chat",
@@ -44,6 +44,20 @@ if os.environ.get("CRSEC_SUMMARIZE_ON_REASONING", "0") == "1":
         "run_gpt_prompt_agent_chat_summarize_ideas",
         "run_gpt_prompt_agent_chat_summarize_relationship",
     }
+
+# ── A/B flag: the two dominant norm fns → PRIMARY_MODEL ──────────────────────
+# calib_008: decide_if_norm_conflict (264x @ 8.7s avg) + norm_reflect_from_
+# thoughts (71x @ 21.8s avg) = 3,845s of 7,661s total LLM time (~50%), both
+# on the dense 32b. CRSEC_NORM_ON_PRIMARY=1 (default) routes exactly these
+# two to PRIMARY_MODEL; checked BEFORE the tier-2 set and the
+# "run_gpt_prompt_norm" prefix rule, which would otherwise catch them.
+# All other norm_* fns stay on the 32b. Set CRSEC_NORM_ON_PRIMARY=0 to
+# restore the previous routing exactly. Read at call time (like
+# CRSEC_TIERED_ROUTING) so the flag can be flipped without re-import.
+NORM_PRIMARY_OVERRIDE_FNS = {
+    "run_gpt_prompt_decide_if_norm_conflict",
+    "run_gpt_prompt_norm_reflect_from_thoughts",
+}
 
 # ── Tier 3: call_type-based reasoning routing (norm module direct callers) ────
 REASONING_CALL_TYPES = {
@@ -222,19 +236,24 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
 
     Routing precedence (when CRSEC_TIERED_ROUTING != "0"):
       1. prompt_fn in SMALL_ROUTE_PROMPT_FNS                            → SMALL_MODEL
-      2. prompt_fn in REASONING_ROUTE_PROMPT_FNS
+      2. CRSEC_NORM_ON_PRIMARY!=0 and fn in NORM_PRIMARY_OVERRIDE_FNS  → PRIMARY_MODEL
+         (explicit exclusion, checked BEFORE the norm prefix rule below)
+      3. prompt_fn in REASONING_ROUTE_PROMPT_FNS
          or prompt_fn.startswith("run_gpt_prompt_norm")                 → REASONING_MODEL
-      3. call_type in REASONING_CALL_TYPES                              → REASONING_MODEL
-      4. else                                                            → PRIMARY_MODEL
+      4. call_type in REASONING_CALL_TYPES                              → REASONING_MODEL
+      5. else                                                            → PRIMARY_MODEL
     When CRSEC_TIERED_ROUTING=0: everything → REASONING_MODEL (A/B baseline).
     """
     prompt_fn = _caller_prompt_fn()
 
     tiered = os.environ.get("CRSEC_TIERED_ROUTING", "1") != "0"
+    norm_on_primary = os.environ.get("CRSEC_NORM_ON_PRIMARY", "1") != "0"
     if not tiered:
         model = REASONING_MODEL
     elif prompt_fn in SMALL_ROUTE_PROMPT_FNS:
         model = SMALL_MODEL
+    elif norm_on_primary and prompt_fn in NORM_PRIMARY_OVERRIDE_FNS:
+        model = PRIMARY_MODEL
     elif (prompt_fn in REASONING_ROUTE_PROMPT_FNS
           or prompt_fn.startswith("run_gpt_prompt_norm")):
         model = REASONING_MODEL
