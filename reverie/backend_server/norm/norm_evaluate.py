@@ -2,6 +2,7 @@ import sys
 
 sys.path.append('../')
 
+import call_profiler
 from norm.run_gpt_prompt_norm import *
 from norm.normNode import *
 from norm.norm_reflect import *
@@ -13,9 +14,14 @@ def _log_norm_adoption(persona, norm, accepted):
     Called right after norm_evaluate_check at both adoption sites (immediate
     and long-term synthesis). norm.poignancy at this point carries the
     utility score on accept, or the rejection code (-2 fact / -3 duplicate /
-    -4 name) on reject. Guarded so a metrics failure can never touch the sim
-    path; persona.metrics is attached in reverie.py.
+    -4 name) on reject. accepted=None means the evaluation DEFERRED on a
+    parse/LLM failure — not a verdict, so no adoption event is emitted
+    (calib_009 logged 188 such failures as rejections with sentinel -1).
+    Guarded so a metrics failure can never touch the sim path;
+    persona.metrics is attached in reverie.py.
     """
+    if accepted is None:
+        return
     try:
         metrics = getattr(persona, "metrics", None)
         if metrics is None or not hasattr(metrics, "log_norm_adoption"):
@@ -301,7 +307,8 @@ def generate_norm_fact_consistency_check(norm):
         else:
             return False, x[1]
     else:
-        return False, ''
+        # fail_safe (unparsed response): not a verdict — caller defers
+        return None, ''
 
 
 def generate_norm_duplicate_check(norm, persona):
@@ -327,9 +334,9 @@ def generate_norm_duplicate_check(norm, persona):
         curr_act_norms = "There is no norm.\n"
     x = run_gpt_norm_duplicate_check(norm.content, curr_act_norms)[0]
     if len(x) == 2:
-        if x[0] == 'yes':
-            return True
-    return False
+        return x[0] == 'yes'
+    # fail_safe (unparsed response): not a verdict — caller defers
+    return None
 
 def generate_norm_duplicate_check_for_long_term(norm, persona):
     if debug: print("GNS FUNCTION: <generate_norm_duplicate_check_for_long_term>")
@@ -348,9 +355,9 @@ def generate_norm_duplicate_check_for_long_term(norm, persona):
         curr_act_norms = "There is no norm.\n"
     x = run_gpt_norm_duplicate_check(norm.content, curr_act_norms)[0]
     if len(x) == 2:
-        if x[0] == 'yes':
-            return True
-    return False
+        return x[0] == 'yes'
+    # fail_safe (unparsed response): not a verdict — caller defers
+    return None
 
 def generate_seeds_type_check(act_norm):
     '''
@@ -399,7 +406,7 @@ def generate_seeds_type_check_v2(act_norm):
     ret = []
     if len(y) == 3:
         if y[0] == 'no':
-            return [False]
+            return [False]      # parsed STEP-1 verdict: not a norm
         if y[1] == 'correct':
             ret += [True]
         else:
@@ -407,7 +414,10 @@ def generate_seeds_type_check_v2(act_norm):
         ret += [y[2]]
         return ret
     else:
-        return [False]
+        # fail_safe (unparsed response): not a verdict — caller defers.
+        # calib_009: this branch fired 188x and each was logged as a
+        # rejection; it must be distinguishable from the parsed 'no'.
+        return None
 
 
 def generate_norm_utility(norm):
@@ -472,7 +482,9 @@ def generate_recognize_conflict_check(new_norm, persona):
         curr_act_norms = "There is no norm.\n"
     x = run_gpt_norm_recognize_conflict_check(new_norm.content, curr_act_norms)[0]
     if x == False:
-        return True
+        # fail_safe (unparsed response): not a verdict — caller defers.
+        # Previously a parse failure was treated as "conflict" (rejection).
+        return None
     if x == 'yes':
         return True
     return False
@@ -513,6 +525,15 @@ def name_check(norm, personas):
     return False
 
 
+def _defer(stage, new_norm):
+    """A parse/LLM failure in the evaluation chain: the seed is left pending
+    (poignancy stays -1, re-evaluated at the next trigger) instead of being
+    rejected, and no adoption event is emitted. calib_009 rejected 188 seeds
+    on type-check parse failures alone."""
+    call_profiler.incr(f"eval_deferred_{stage}")
+    return None, new_norm
+
+
 def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
     '''
 
@@ -520,7 +541,8 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         norm: node
 
     Returns:
-        save_tag: true or false
+        save_tag: True (adopt) / False (parsed rejection) / None (deferred
+                  on a parse/LLM failure — not a verdict)
         new_norm: node
     '''
     new_norm = NormNode(norm.id, norm.type, norm.content, norm.subject, norm.predicate, norm.object, norm.related_desc,
@@ -533,7 +555,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         norm.poignancy = -4
         return False, new_norm
 
-    # Fact Consistency Check
+    # Fact Consistency Check (cons_tag None = unparsed response, not a "no")
     cons_tag = False
     for i in range(5):
         cons_tag, new_norm_str = generate_norm_fact_consistency_check(new_norm)
@@ -542,44 +564,51 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         else:
             new_norm = generate_format_norm(new_norm_str, norm.related_desc)
             if new_norm == None:
-                return False, new_norm
+                return _defer("format_rewrite", new_norm)
             norm.subject=new_norm.subject
             norm.content=new_norm.content
             norm.predicate=new_norm.predicate
             norm.object=new_norm.object
+    if cons_tag is None:
+        return _defer("fact_consistency", new_norm)
     if cons_tag == False:
         norm.poignancy = -2
         return False, new_norm
 
-    # Duplicate Check
+    # Duplicate Check (None = unparsed response)
     if long_term_tag:
-        if generate_norm_duplicate_check_for_long_term(new_norm, persona):
-            norm.poignancy = -3
-            return False, new_norm
+        dup = generate_norm_duplicate_check_for_long_term(new_norm, persona)
     else:
-        if generate_norm_duplicate_check(new_norm, persona):
-            norm.poignancy = -3
-            return False, new_norm
+        dup = generate_norm_duplicate_check(new_norm, persona)
+    if dup is None:
+        return _defer("duplicate_check", new_norm)
+    if dup:
+        norm.poignancy = -3
+        return False, new_norm
 
-    # Type Check
+    # Type Check (None = unparsed response; [False] = parsed STEP-1 'no')
     type_tag = generate_seeds_type_check_v2(new_norm)
+    if type_tag is None:
+        return _defer("type_check", new_norm)
     if len(type_tag) != 2:
         return False, new_norm
     new_norm.type = type_tag[1]
     norm.type = new_norm.type
 
-    # Conflict Check
-    if generate_recognize_conflict_check(new_norm, persona):
+    # Conflict Check (None = unparsed response)
+    conflict = generate_recognize_conflict_check(new_norm, persona)
+    if conflict is None:
+        return _defer("conflict_check", new_norm)
+    if conflict:
         return False, new_norm
 
     # long_term_norm
     if long_term_tag:
         utility = generate_long_term_norm_utility(new_norm, persona)
-        try:
-            if len(utility) != 2:
-                return False, new_norm
-        except:
-            return False, new_norm
+        # False (related-norm lookup failed) or a shape-mismatched fail_safe:
+        # no scored verdict was produced — defer rather than reject.
+        if not isinstance(utility, (list, tuple)) or len(utility) != 2:
+            return _defer("long_term_utility", new_norm)
         new_norm.poignancy = utility[0]
         new_norm.poi_reason = utility[1]
         norm.poignancy = new_norm.poignancy
@@ -588,10 +617,12 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
 
     # normal norm
     utility = generate_normal_norm_utility(new_norm, persona)
-    # Defense in depth: a malformed utility (bare False, [False], None) must not
-    # crash the unpack below. len(False) is a TypeError, so check the shape.
-    if not isinstance(utility, (list, tuple)) or len(utility) != 2:
-        return False, new_norm
+    # Malformed shape, or the shape-matched [4, "fail_safe"] sentinel both
+    # utility paths return on an unparsed response: without it, an LLM
+    # failure would silently ADOPT the seed with a fabricated utility of 4.
+    if not isinstance(utility, (list, tuple)) or len(utility) != 2 \
+            or utility[1] == "fail_safe":
+        return _defer("utility", new_norm)
     new_norm.poignancy = utility[0]
     new_norm.poi_reason = utility[1]
     norm.poignancy = new_norm.poignancy

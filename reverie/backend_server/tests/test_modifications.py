@@ -738,6 +738,108 @@ class TestNormAdoptionMetricsHook(unittest.TestCase):
         self._run(persona, True)  # must not raise
         self.assertEqual(len(persona.norm_database.added), 1)
 
+    def test_deferral_not_logged_not_adopted(self):
+        """save_tag=None (parse failure) emits NO adoption event and does not
+        adopt; the seed stays pending for the next trigger."""
+        class FakeMetrics:
+            def __init__(self):
+                self.calls = []
+
+            def log_norm_adoption(self, **kw):
+                self.calls.append(kw)
+
+        metrics = FakeMetrics()
+        persona, seed = _adoption_persona(metrics)
+        self._run(persona, None)
+        self.assertEqual(metrics.calls, [])
+        self.assertEqual(persona.norm_database.added, [])
+        self.assertEqual(seed.poignancy, -1)  # still pending
+
+
+class TestEvalDeferral(unittest.TestCase):
+    """Pass 3 Change B: a parse/LLM failure at any evaluation stage defers
+    (save_tag None, seed pending) instead of rejecting; parsed verdicts keep
+    their exact previous behavior."""
+
+    def _check(self, **overrides):
+        from contextlib import ExitStack
+
+        from norm import norm_evaluate
+        from norm.normNode import NormNode
+
+        stages = dict(
+            generate_norm_fact_consistency_check=lambda n: (True, ''),
+            generate_norm_duplicate_check=lambda n, p: False,
+            generate_seeds_type_check_v2=lambda n: [True, "injunctive"],
+            generate_recognize_conflict_check=lambda n, p: False,
+            generate_normal_norm_utility=lambda n, p: [50, "useful"],
+        )
+        stages.update(overrides)
+        norm = NormNode(1, "injunctive", "No smoking indoors.", "everyone",
+                        "should not smoke", "indoors")
+        with ExitStack() as stack:
+            for name, fake in stages.items():
+                stack.enter_context(patch.object(norm_evaluate, name, fake))
+            save_tag, new_norm = norm_evaluate.norm_evaluate_check(
+                norm, _NS(), {})
+        return save_tag, new_norm, norm
+
+    def test_all_parsed_adopts_identically(self):
+        save_tag, new_norm, norm = self._check()
+        self.assertIs(save_tag, True)
+        self.assertEqual(new_norm.poignancy, 50)
+        self.assertEqual(norm.poignancy, 50)
+
+    def test_type_check_failure_defers(self):
+        save_tag, _, norm = self._check(
+            generate_seeds_type_check_v2=lambda n: None)
+        self.assertIsNone(save_tag)
+        self.assertEqual(norm.poignancy, -1)  # pending, not rejected
+
+    def test_type_check_parsed_no_still_rejects(self):
+        save_tag, _, norm = self._check(
+            generate_seeds_type_check_v2=lambda n: [False])
+        self.assertIs(save_tag, False)
+        self.assertEqual(norm.poignancy, -1)  # same sentinel as before
+
+    def test_duplicate_failure_defers_but_verdict_rejects(self):
+        save_tag, _, norm = self._check(
+            generate_norm_duplicate_check=lambda n, p: None)
+        self.assertIsNone(save_tag)
+        self.assertEqual(norm.poignancy, -1)
+
+        save_tag, _, norm = self._check(
+            generate_norm_duplicate_check=lambda n, p: True)
+        self.assertIs(save_tag, False)
+        self.assertEqual(norm.poignancy, -3)
+
+    def test_fact_consistency_failure_defers_but_verdict_rejects(self):
+        save_tag, _, norm = self._check(
+            generate_norm_fact_consistency_check=lambda n: (None, ''))
+        self.assertIsNone(save_tag)
+        self.assertEqual(norm.poignancy, -1)
+
+        save_tag, _, norm = self._check(
+            generate_norm_fact_consistency_check=lambda n: (False, ''))
+        self.assertIs(save_tag, False)
+        self.assertEqual(norm.poignancy, -2)
+
+    def test_conflict_failure_defers_but_verdict_rejects(self):
+        save_tag, _, norm = self._check(
+            generate_recognize_conflict_check=lambda n, p: None)
+        self.assertIsNone(save_tag)
+
+        save_tag, _, norm = self._check(
+            generate_recognize_conflict_check=lambda n, p: True)
+        self.assertIs(save_tag, False)
+
+    def test_utility_failsafe_defers_instead_of_fake_adopt(self):
+        """[4, "fail_safe"] previously ADOPTED the seed with utility 4."""
+        save_tag, _, norm = self._check(
+            generate_normal_norm_utility=lambda n, p: [4, "fail_safe"])
+        self.assertIsNone(save_tag)
+        self.assertEqual(norm.poignancy, -1)
+
 
 if __name__ == "__main__":
     unittest.main()

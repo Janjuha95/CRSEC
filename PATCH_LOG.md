@@ -753,3 +753,35 @@ chain, run against BOTH bundles):
 - calib_008 regression: unchanged (100/100/100/94.4/100; the 94.4 residual
   is the known single degenerate response × 5 retries).
 Suite: 122 passed, 1 deselected (pre-existing 462a1a6 failure).
+
+### Change B (pass 3) — failure ≠ rejection in the evaluation chain (`norm/norm_evaluate.py`)
+
+norm_evaluate_check now returns save_tag ∈ {True, False, None}: None means a
+stage produced NO parsed verdict (fail_safe / unparsed response), in which
+case the seed is left pending (poignancy stays -1, re-evaluated at the next
+trigger), `call_profiler.incr("eval_deferred_<stage>")` fires, and NO
+adoption event is logged (_log_norm_adoption returns early on None).
+Stage-level discrimination, all previously conflated with verdicts:
+
+| stage | previous failure behavior | now |
+|---|---|---|
+| fact_consistency fail_safe | branded -2 (permanent rejection) | defer (`eval_deferred_fact_consistency`) |
+| format rewrite → None | reject-this-round | defer (`eval_deferred_format_rewrite`) |
+| duplicate fail_safe | treated as "not duplicate", chain continued | defer (`eval_deferred_duplicate_check`) |
+| type_check fail_safe | rejected + logged with sentinel -1 (the 188) | defer (`eval_deferred_type_check`) |
+| conflict fail_safe | treated as "conflict" → rejected | defer (`eval_deferred_conflict_check`) |
+| utility [4,"fail_safe"] | silently ADOPTED with fabricated utility 4 | defer (`eval_deferred_utility`) |
+| long-term utility False/misshapen | reject-this-round | defer (`eval_deferred_long_term_utility`) |
+
+Parsed verdicts unchanged: name -4, fact-'no'-exhausted -2, duplicate-'yes'
+-3, type STEP-1 'no' → reject with poignancy left -1 (pre-existing
+semantics), conflict-'yes' → reject, parsed utility → adopt. NOTE for log
+readers: from this pass on, a -1-scored rejection in norm_adoption_log is a
+PARSED verdict (STEP-1 'no' / conflict 'yes'), never a parser failure —
+failures no longer produce events at all.
+
+The utility fns' [4,"fail_safe"] return contracts are untouched (tests pin
+the length-2 failure shape); discrimination happens at the consumer via the
+reason marker. 8 new tests (all-parsed identical behavior; per-stage
+failure→defer; per-stage verdict→reject; deferral emits no metrics event).
+Suite: 130 passed, 1 deselected.
