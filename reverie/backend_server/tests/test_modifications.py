@@ -912,5 +912,75 @@ class TestTransactionalSynthesis(unittest.TestCase):
         self.assertIn("synthesis_aborted", counters)
 
 
+class TestNormLoadMismatch(unittest.TestCase):
+    """Pass 4 Change B: the loader must never silently zero a persona whose
+    scratch claims norms; a short file must partially load, not crash."""
+
+    def _entry(self, i):
+        return {"ID": i, "type": "injunctive", "content": f"Norm {i}.",
+                "subject": "everyone", "predicate": "follows",
+                "object": f"rule {i}", "utility": 50,
+                "activation_state": True, "validity_state": True}
+
+    def _base(self, tmp, seed_entries, act_entries):
+        d = os.path.join(tmp, "norms")
+        os.makedirs(d, exist_ok=True)
+        if seed_entries is not None:
+            with open(os.path.join(d, "personal_norm_database.json"), "w") as f:
+                json.dump({f"norm_{i}": self._entry(i)
+                           for i in range(1, seed_entries + 1)}, f)
+        if act_entries is not None:
+            with open(os.path.join(d, "personal_norm_database_validity.json"),
+                      "w") as f:
+                json.dump({f"norm_{i}": self._entry(i)
+                           for i in range(1, act_entries + 1)}, f)
+        return d
+
+    def _load(self, d, expected):
+        from norm import normDatabase
+        counters = []
+        with patch.object(normDatabase.call_profiler, "incr",
+                          lambda name, n=1: counters.append(name)):
+            db = normDatabase.NormDatabase(d, expected, expected, None)
+        return db, counters
+
+    def test_missing_files_with_expected_counts_warns(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._base(tmp, None, None)
+            db, counters = self._load(d, 5)
+        self.assertEqual(db.norm_count, 0)
+        self.assertEqual(counters.count("norm_load_mismatch"), 2)
+
+    def test_short_file_partially_loads_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._base(tmp, 3, 3)
+            db, counters = self._load(d, 5)  # scratch claims 5, files have 3
+        self.assertEqual(db.norm_count, 3)
+        self.assertEqual(db.act_norm_count, 3)
+        self.assertEqual(counters.count("norm_load_mismatch"), 2)
+
+    def test_consistent_base_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._base(tmp, 5, 5)
+            db, counters = self._load(d, 5)
+        self.assertEqual(db.norm_count, 5)
+        self.assertEqual(db.act_norm_count, 5)
+        self.assertNotIn("norm_load_mismatch", counters)
+
+    def test_zero_expected_missing_files_is_silent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._base(tmp, None, None)
+            db, counters = self._load(d, 0)
+        self.assertNotIn("norm_load_mismatch", counters)
+
+    def test_strict_mode_raises(self):
+        from norm import normDatabase
+        with tempfile.TemporaryDirectory() as tmp:
+            d = self._base(tmp, None, None)
+            with patch.dict(os.environ, {"CRSEC_STRICT_NORM_LOAD": "1"}):
+                with self.assertRaises(RuntimeError):
+                    normDatabase.NormDatabase(d, 5, 5, None)
+
+
 if __name__ == "__main__":
     unittest.main()

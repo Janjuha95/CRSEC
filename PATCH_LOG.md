@@ -859,3 +859,18 @@ rows [ok]); full --from-file run against a temp copy (entrepreneurs seeded
 5/5 both files, accidents stripped+demoted, table all-[ok], exit 0); loader
 round-trip on the seeded output (NormDatabase loads 5 seeds + 5 actives, all
 activation_state true).
+
+### Change B (pass 4) — loader never silently zeroes (`norm/normDatabase.py`)
+
+Three mismatch cases now shout a stderr banner (persona name, file path,
+expected vs found counts, pointer to tools/seed_base_norms.py), increment
+`norm_load_mismatch`, and raise RuntimeError under CRSEC_STRICT_NORM_LOAD=1:
+1. seed file missing while scratch norm_count > 0;
+2. validity file missing while scratch act_norm_count > 0;
+3. a file with FEWER norm_i entries than scratch claims — previously this
+   was not merely silent, it CRASHED with an unhandled KeyError; now it loads
+   what exists, then warns.
+Default behavior otherwise unchanged: consistent bases load exactly as
+before, zero-count personas with no files stay silent. 5 new tests (missing
+files warn ×2 counters, short file partially loads, consistent base silent,
+zero-expected silent, strict mode raises). Suite: 138 passed, 1 deselected.

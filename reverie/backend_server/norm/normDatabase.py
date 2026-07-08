@@ -1,9 +1,37 @@
 import json
+import os
 import sys
 
 sys.path.append('../')
+import call_profiler
 from global_methods import *
 from norm.normNode import *
+
+
+def _load_mismatch(persona, path, expected, found):
+    """A norm file is missing or has fewer entries than the persona's scratch
+    counts claim. calib_009/010 ran 7 personas with silently EMPTY norm
+    databases because of exactly this; it must never be quiet again.
+    CRSEC_STRICT_NORM_LOAD=1 makes it fatal; default keeps the old behavior
+    (load what exists) after shouting."""
+    name = getattr(getattr(persona, "scratch", None), "name", None) or "?"
+    banner = "!" * 78
+    print(banner, file=sys.stderr)
+    print(f"!! NORM LOAD MISMATCH for persona {name!r}", file=sys.stderr)
+    print(f"!!   {path}", file=sys.stderr)
+    print(f"!!   scratch expects {expected} norms, found {found}. The base is "
+          f"internally inconsistent", file=sys.stderr)
+    print(f"!!   (see tools/seed_base_norms.py). Set CRSEC_STRICT_NORM_LOAD=1 "
+          f"to make this fatal.", file=sys.stderr)
+    print(banner, file=sys.stderr)
+    try:
+        call_profiler.incr("norm_load_mismatch")
+    except Exception:
+        pass
+    if os.environ.get("CRSEC_STRICT_NORM_LOAD", "0") == "1":
+        raise RuntimeError(
+            f"norm load mismatch for {name!r}: {path} expected {expected} "
+            f"norms, found {found} (CRSEC_STRICT_NORM_LOAD=1)")
 
 
 class NormDatabase:
@@ -21,6 +49,13 @@ class NormDatabase:
             print("GNS FUNCTION: <NormDatabase__init__norm_seed>")
             scratch_load = json.load(open(f"{f_saved}/personal_norm_database.json"))
             for i in range(1, normSeedCount + 1, 1):
+                if f"norm_{i}" not in scratch_load:
+                    # fewer entries than scratch claims: previously a KeyError
+                    # crash; now load what exists and shout
+                    _load_mismatch(persona,
+                                   f"{f_saved}/personal_norm_database.json",
+                                   normSeedCount, i - 1)
+                    break
                 norm = scratch_load[f"norm_{i}"]
                 try:
                     related_desc = norm["related_desc"]
@@ -53,11 +88,20 @@ class NormDatabase:
             print(self.norm_seed)
         else:
             print(f"INIT NormDatabase: {f_saved}/personal_norm_database.json could not find")
+            if normSeedCount > 0:
+                _load_mismatch(persona, f"{f_saved}/personal_norm_database.json",
+                               normSeedCount, 0)
 
         if check_if_file_exists(f"{f_saved}/personal_norm_database_validity.json"):
             print("GNS FUNCTION: <NormDatabase__init__act_norm>")
             scratch_load = json.load(open(f"{f_saved}/personal_norm_database_validity.json"))
             for i in range(1, normCount + 1, 1):
+                if f"norm_{i}" not in scratch_load:
+                    _load_mismatch(
+                        persona,
+                        f"{f_saved}/personal_norm_database_validity.json",
+                        normCount, i - 1)
+                    break
                 norm = scratch_load[f"norm_{i}"]
                 try:
                     related_desc = norm["related_desc"]
@@ -78,6 +122,10 @@ class NormDatabase:
             print(self.act_norm)
         else:
             print(f"INIT NormDatabase: {f_saved}/personal_norm_database_validity.json could not find")
+            if normCount > 0:
+                _load_mismatch(
+                    persona, f"{f_saved}/personal_norm_database_validity.json",
+                    normCount, 0)
 
     def retrieve_relevant_norms(self):  # , s_content, p_content, o_content):
         # contents = [s_content, p_content, o_content]
