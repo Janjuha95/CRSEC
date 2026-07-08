@@ -88,96 +88,94 @@ OLLAMA_TEMPERATURE = float(os.environ.get("CRSEC_TEMPERATURE", "0"))
 # system prompt; think=False on the API call is the belt-and-suspenders.
 NO_THINK_SYSTEM = "/no_think"
 
-# ── Output-token caps (num_predict), keyed by prompt_fn ──────────────────────
-# Generation tokens dominate wall time, and without num_predict a
-# classifier-style call can ramble unboundedly. Caps are sized from each fn's
-# parser contract (what the validate/clean_up pair actually needs to see) plus
-# the legacy gpt_param max_tokens as intent evidence — llm_logs/calls.jsonl
-# has no prompt_fn field, so data-derived p99 caps were not possible.
-# Floor is 32: Qwen3 may spend a few tokens on an empty <think></think>
-# preamble even with think=False.
+# ── Output-token caps (num_predict), keyed by prompt_fn — v2 ────────────────
+# v1 was sized from parser contracts + legacy max_tokens because the old
+# calls.jsonl had no way to attribute calls; it truncated live planning calls
+# and was disabled via CRSEC_NUM_PREDICT=0. v2 is derived from calib_008
+# (2,249 calls attributed per-fn by template fingerprint; per-fn p99 response
+# length, tokens ≈ chars/3.5, cap = max(64, ceil(2 × p99_tokens))).
+#
+# TIGHT caps go ONLY to truncation-safe fns — parsers verified to read from
+# the TOP of the output (first int / first tuple / option token), where a
+# post-payload cut cannot corrupt the parse. Everything else (plans,
+# schedules, dialogue, bottom-scanning yes/no deciders, whole-string
+# summaries, norm reflection/format/evaluation) gets a blanket 4096: pure
+# runaway protection, comfortably above every measured p99 (largest:
+# new_decomp_schedule ≈ 3,407 tok).
 # A too-tight cap is WORSE than none: truncation → parse failure → the
 # safe_generate repeat loop re-fires the call 3-5x. The done_reason=="length"
 # tripwire below (truncated_* counters) is how a bad cap shows up in the next
 # calibration run.
-# Kill-switch: CRSEC_NUM_PREDICT=0 disables all caps.
+# Kill-switch: CRSEC_NUM_PREDICT=0 disables all caps (calib_009 should run
+# with caps ENABLED — leave CRSEC_NUM_PREDICT unset).
 # Unlisted fns (incl. prompt_fn=="unknown" from direct llm_call callers such
 # as defection_engine/creation.py) get CRSEC_NUM_PREDICT_DEFAULT.
 PROMPT_FN_NUM_PREDICT = {
-    # -- int-score / yes-no / option pickers (bare token + slack) --
-    "run_gpt_prompt_event_poignancy": 32,
-    "run_gpt_prompt_thought_poignancy": 32,
-    "run_gpt_prompt_chat_poignancy": 32,
-    "run_gpt_prompt_decide_to_talk": 32,
-    "run_gpt_prompt_decide_to_react": 32,
-    "run_gpt_prompt_wake_up_hour": 32,
-    "run_gpt_generate_safety_score": 32,       # strict {"output": N} json
-    "run_gpt_norm_duplicate_check": 32,        # template: ONLY "YES"/"NO"
-    "run_gpt_prompt_pronunciatio": 32,         # emoji; 16 would breach the floor
-    # -- event triples "(s, p, o)" --
-    "run_gpt_prompt_event_triple": 64,
-    "run_gpt_prompt_act_obj_event_triple": 64,
-    # -- short names / phrases --
-    "run_gpt_prompt_action_sector": 64,
-    "run_gpt_prompt_action_arena": 64,
-    "run_gpt_prompt_action_game_object": 64,
-    "run_gpt_prompt_act_obj_desc": 64,
-    # -- one-liners (legacy max_tokens 40-50) --
-    "run_gpt_prompt_summarize_conversation": 128,
-    "run_gpt_prompt_extract_keywords": 128,
-    "run_gpt_prompt_keyword_to_thoughts": 128,
-    "run_gpt_prompt_convo_to_thoughts": 128,
-    "run_gpt_prompt_generate_whisper_inner_thought": 128,
-    "run_gpt_prompt_planning_thought_on_convo": 128,
-    "run_gpt_prompt_memo_on_convo": 128,
-    "run_gpt_prompt_generate_hourly_schedule": 128,  # single schedule entry, not a full plan
-    # -- yes/no WITH required reasoning or structured segments; capping at 32
-    #    would truncate before the parser's markers appear --
-    "run_gpt_prompt_violation_check": 128,     # 4-key json {violation,severity,certainty,response}
-    "run_gpt_norm_recognize_conflict_check": 128,   # "Answer: yes" + short reason
-    "run_gpt_seeds_content_check": 256,        # Answer 1###/Answer 2###/STAGE 1 segments
-    "run_gpt_seeds_type_check": 256,           # OUTPUT + type-classification echo
-    "run_gpt_seeds_type_check_v2": 256,        # STEP 1/STEP 2/type lines
-    "run_gpt_norm_fact_consistency_check": 256,  # Answer + full "New norm:" text
-    "run_gpt_norm_recognize": 256,             # Answer 1..4 lines
-    "run_gpt_immediate_evaluate_recognization": 256,  # NORM UTILITY + ANSWER lines
-    "run_gpt_norm_utility": 256,               # "OUTPUT: N. <reason>" (reason is consumed)
-    "run_gpt_long_term_norm_utility": 256,     # FINAL SCORE + rationale
-    # -- summaries --
-    "run_gpt_prompt_agent_chat_summarize_ideas": 256,
-    "run_gpt_prompt_agent_chat_summarize_relationship": 256,
-    "run_gpt_prompt_summarize_ideas": 256,
-    "run_gpt_chat_norms_summarize": 256,
-    "run_gpt_conflict_chat_reflect": 256,
-    "run_gpt_non_norm_conflict_chat_reflect": 256,
-    "run_gpt_prompt_focal_pt": 256,
-    "run_gpt_active_norms_classfication": 256,
-    "run_gpt_revise_identity_plan": 256,
-    "run_gpt_revise_identity_thought": 256,
-    "run_gpt_revise_identity_currently": 256,
-    "run_gpt_revise_identity_daily_plan_req": 256,
-    # -- dialogue json --
-    "run_gpt_generate_iterative_chat_utt": 512,
-    "run_gpt_prompt_agent_chat": 512,
-    "run_gpt_prompt_create_conversation": 512,
-    "run_gpt_prompt_generate_next_convo_line": 512,
-    "run_gpt_active_norms_classfication_v2": 512,  # free-form, passed through raw
-    # -- norm creation / format / long-term synthesis --
-    "run_gpt_prompt_norm_reflect_from_thoughts": 768,
-    "run_gpt_prompt_norm_format": 768,
-    "run_gpt_norm_long_term_synthesis": 768,
-    # check_conflict_decide_talk_v5 demands step-by-step reasoning for three
-    # questions before FINAL OUTPUT, and _final_output_decision's fallback
-    # bottom-scans for any yes/no — a truncated response could silently invert
-    # the decision instead of failing. Keep this one roomy.
-    "run_gpt_prompt_decide_if_norm_conflict": 768,
-    # -- planning / schedule / decomposition --
-    "run_gpt_prompt_daily_plan": 2048,
-    "run_gpt_prompt_daily_plan_v2": 2048,
-    "run_gpt_prompt_task_decomp": 2048,
-    "run_gpt_prompt_task_decomp_v2": 2048,
-    "run_gpt_prompt_new_decomp_schedule": 2048,
-    "run_gpt_prompt_insight_and_guidance": 1024,  # n insights + evidence (legacy 1500)
+    # -- data-derived tight caps: top-reading parsers only (p99 tok in note) --
+    "run_gpt_prompt_event_poignancy": 64,      # p99 4; first-int
+    "run_gpt_prompt_thought_poignancy": 64,    # no calib_008 calls; same parser family as the other poignancy fns
+    "run_gpt_prompt_chat_poignancy": 64,       # p99 4; first-int
+    "run_gpt_prompt_wake_up_hour": 614,        # p99 307; first-int, hour leads the prose
+    "run_gpt_prompt_action_sector": 64,        # p99 7; option token
+    "run_gpt_prompt_action_arena": 64,         # p99 2; option token
+    "run_gpt_prompt_action_game_object": 96,   # p99 48; option token
+    "run_gpt_prompt_event_triple": 530,        # p99 265; tuple leads even rambling responses
+    "run_gpt_prompt_act_obj_event_triple": 105,  # p99 52; first tuple
+    "run_gpt_prompt_violation_check": 64,      # p99 21; one-line 4-key json
+    "run_gpt_prompt_pronunciatio": 64,         # stubbed in-sim; emoji floor
+    # -- blanket runaway protection: NOT truncation-safe (bottom-scan yes/no,
+    #    whole-string consumers, json whose loss silently drops data) or no
+    #    calib_008 data (norm_evaluate family idle while the seed pipeline
+    #    was stalled pre-Change-A) --
+    "run_gpt_prompt_decide_to_talk": 4096,     # p99 732; bottom-scan Answer: yes/no
+    "run_gpt_prompt_decide_to_react": 4096,    # p99 983; bottom-scan
+    "run_gpt_prompt_decide_if_norm_conflict": 4096,  # p99 679; FINAL OUTPUT bottom-scan
+    "run_gpt_prompt_norm_reflect_from_thoughts": 4096,  # p99 1917
+    "run_gpt_prompt_norm_format": 4096,        # p99 192, but truncated json = dropped norm
+    "run_gpt_prompt_focal_pt": 4096,           # p99 525; envelope needs closing brace
+    "run_gpt_prompt_new_decomp_schedule": 4096,  # p99 3407 — the biggest producer
+    "run_gpt_prompt_daily_plan": 4096,
+    "run_gpt_prompt_daily_plan_v2": 4096,      # p99 1612
+    "run_gpt_prompt_task_decomp": 4096,        # p99 1440 (with _v2 combined)
+    "run_gpt_prompt_task_decomp_v2": 4096,
+    "run_gpt_prompt_generate_hourly_schedule": 4096,  # p99 165 but max ~1694
+    "run_gpt_prompt_insight_and_guidance": 4096,  # p99 208; numbered list consumed whole
+    "run_gpt_generate_iterative_chat_utt": 4096,  # p99 235; dialogue json
+    "run_gpt_prompt_agent_chat": 4096,
+    "run_gpt_prompt_create_conversation": 4096,
+    "run_gpt_prompt_generate_next_convo_line": 4096,
+    "run_gpt_prompt_agent_chat_summarize_ideas": 4096,
+    "run_gpt_prompt_agent_chat_summarize_relationship": 4096,  # p99 541
+    "run_gpt_prompt_summarize_ideas": 4096,
+    "run_gpt_prompt_summarize_conversation": 4096,  # p99 118; whole-string
+    "run_gpt_prompt_act_obj_desc": 4096,       # p99 91; whole-string
+    "run_gpt_prompt_extract_keywords": 4096,
+    "run_gpt_prompt_keyword_to_thoughts": 4096,
+    "run_gpt_prompt_convo_to_thoughts": 4096,
+    "run_gpt_prompt_generate_whisper_inner_thought": 4096,
+    "run_gpt_prompt_planning_thought_on_convo": 4096,  # p99 158
+    "run_gpt_prompt_memo_on_convo": 4096,      # p99 98
+    "run_gpt_generate_safety_score": 4096,
+    "run_gpt_chat_norms_summarize": 4096,      # p99 53; list consumed whole
+    "run_gpt_conflict_chat_reflect": 4096,     # p99 638; Step 3 bottom-scan
+    "run_gpt_non_norm_conflict_chat_reflect": 4096,  # p99 237
+    "run_gpt_norm_duplicate_check": 4096,
+    "run_gpt_norm_recognize_conflict_check": 4096,
+    "run_gpt_seeds_content_check": 4096,
+    "run_gpt_seeds_type_check": 4096,
+    "run_gpt_seeds_type_check_v2": 4096,
+    "run_gpt_norm_fact_consistency_check": 4096,
+    "run_gpt_norm_recognize": 4096,
+    "run_gpt_immediate_evaluate_recognization": 4096,
+    "run_gpt_norm_utility": 4096,
+    "run_gpt_long_term_norm_utility": 4096,
+    "run_gpt_norm_long_term_synthesis": 4096,
+    "run_gpt_active_norms_classfication": 4096,
+    "run_gpt_active_norms_classfication_v2": 4096,
+    "run_gpt_revise_identity_plan": 4096,
+    "run_gpt_revise_identity_thought": 4096,
+    "run_gpt_revise_identity_currently": 4096,
+    "run_gpt_revise_identity_daily_plan_req": 4096,
 }
 
 NUM_PREDICT_ENABLED = os.environ.get("CRSEC_NUM_PREDICT", "1") != "0"

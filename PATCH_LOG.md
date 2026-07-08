@@ -607,3 +607,44 @@ in calib_009's profile.json: if the 30b's output format breaks
 `_final_output_decision` (bottom-scan, unchanged) or the strict
 "- Norm: ... Related thought: ..." reflect parser, retries will show it
 immediately, and CRSEC_NORM_ON_PRIMARY=0 is the rollback.
+
+### Change C — num_predict caps v2, derived from calib_008 (`llm_router.py`)
+
+The v1 table came from thinking-contaminated logs / static tiers, truncated
+live planning calls, and was disabled (CRSEC_NUM_PREDICT=0). v2 replaces the
+whole PROMPT_FN_NUM_PREDICT table using calib_008's 2,249 calls (attributed
+per fn by template fingerprint, exact vs profile.json): per-fn p99 response
+chars, tokens ≈ chars/3.5, cap = max(64, ceil(2 × p99_tokens)).
+
+Tight, data-derived caps ONLY for parsers verified to read from the top of
+the output (a post-payload cut cannot corrupt the parse):
+
+| fn | p99 tok | cap | parser evidence |
+|---|---|---|---|
+| event_poignancy | 4 | 64 | first-int (strict int() then `_extract_first_int`) |
+| chat_poignancy | 4 | 64 | first-int |
+| thought_poignancy | no calls | 64 | same parser family as the other poignancy fns |
+| wake_up_hour | 307 | 614 | first-int; sampled responses lead with the hour |
+| action_sector | 7 | 64 | option token, first line |
+| action_arena | 2 | 64 | option token |
+| action_game_object | 48 | 96 | option token |
+| event_triple | 265 | 530 | first tuple; all 6 long/rambling calib_008 responses lead with it |
+| act_obj_event_triple | 52 | 105 | first tuple |
+| violation_check | 21 | 64 | one-line 4-key JSON |
+| pronunciatio | stubbed | 64 | emoji; floor |
+
+Everything else — bottom-scanning yes/no deciders (decide_to_talk p99 732,
+decide_to_react 983, decide_if_norm_conflict 679, conflict_chat_reflect 638),
+whole-string consumers (summaries, act_obj_desc), JSON whose truncation
+silently drops data (norm_format), plans/schedules (new_decomp_schedule p99
+3,407 — the largest measured), dialogue, and the entire unmeasured
+norm_evaluate family (zero calib_008 calls because the seed pipeline was
+stalled pre-Change-A) — gets a blanket 4096: pure runaway protection above
+every measured p99. Unlisted fns keep CRSEC_NUM_PREDICT_DEFAULT (1024).
+
+Unchanged: the CRSEC_NUM_PREDICT=0 kill-switch and the done_reason=="length"
+truncated_* tripwire. calib_009 must run with caps ENABLED (leave
+CRSEC_NUM_PREDICT unset) and watch truncated_* ≈ 0.
+Data basis: `calib_artifacts/calib_008/calls.jsonl` per-fn length stats
+(p50/p95/p99/max) computed by the attribution script; see the analysis table
+in the Pass 2 session notes / length_stats.json.
