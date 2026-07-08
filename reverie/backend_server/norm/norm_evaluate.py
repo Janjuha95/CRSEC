@@ -7,6 +7,30 @@ from norm.normNode import *
 from norm.norm_reflect import *
 
 
+def _log_norm_adoption(persona, norm, accepted):
+    """Observation-only metrics hook for an adoption decision.
+
+    Called right after norm_evaluate_check at both adoption sites (immediate
+    and long-term synthesis). norm.poignancy at this point carries the
+    utility score on accept, or the rejection code (-2 fact / -3 duplicate /
+    -4 name) on reject. Guarded so a metrics failure can never touch the sim
+    path; persona.metrics is attached in reverie.py.
+    """
+    try:
+        metrics = getattr(persona, "metrics", None)
+        if metrics is None or not hasattr(metrics, "log_norm_adoption"):
+            return
+        metrics.log_norm_adoption(
+            agent_name=persona.scratch.name,
+            norm_content=norm.content,
+            accepted=bool(accepted),
+            utility_score=norm.poignancy,
+            agent_identity=persona.scratch.identity,
+            step=getattr(persona.scratch, "curr_time", None))
+    except Exception:
+        pass
+
+
 def generate_immediate_evaluate_recognization(norm, persona):
     '''
     Args:
@@ -233,6 +257,7 @@ def run_long_term_norm_evaluate(persona, personas):
                 continue
             persona.norm_database.add_norm_seed(norm_node)
             save_tag, new_norm = norm_evaluate_check(norm_node, persona, personas, long_term_tag=True)
+            _log_norm_adoption(persona, norm_node, save_tag)
             if save_tag:
                 specific_norm_deactive(persona, desc[i])
                 new_norm.activation_state = True
@@ -581,6 +606,7 @@ def norms_evaluate(persona, personas):
             if norm.poignancy != -1:
                 continue
             save_tag, new_norm = norm_evaluate_check(norm, persona, personas)
+            _log_norm_adoption(persona, norm, save_tag)
             if save_tag:
                 new_norm.activation_state = True
                 norm.activation_state = True

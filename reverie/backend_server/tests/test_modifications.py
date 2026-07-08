@@ -640,5 +640,104 @@ class TestRunGptPromptViolationCheck(unittest.TestCase):
         })
 
 
+class _NS:
+    """Bare attribute container (MagicMock would auto-create `metrics`)."""
+
+
+def _adoption_persona(metrics=None):
+    p = _NS()
+    p.scratch = _NS()
+    p.scratch.name = "Carlos Gomez"
+    p.scratch.identity = "citizen"
+    p.scratch.curr_time = "2026-07-08 09:00"
+    p.scratch.norm_evaluate = True
+    p.scratch.norm_evaluate_trigger_curr = 100
+    p.scratch.norm_evaluate_trigger_max = 100
+    seed = _NS()
+    seed.id = "1"
+    seed.poignancy = -1
+    seed.content = "No smoking indoors."
+    seed.activation_state = False
+    seed.validity_state = False
+    p.norm_database = _NS()
+    p.norm_database.norm_seed = {"1": seed}
+    p.norm_database.added = []
+    p.norm_database.add_act_norm = p.norm_database.added.append
+    if metrics is not None:
+        p.metrics = metrics
+    return p, seed
+
+
+def _accepted_norm():
+    n = _NS()
+    n.content = "No smoking indoors."
+    n.poignancy = 50
+    n.activation_state = False
+    n.validity_state = False
+    return n
+
+
+class TestNormAdoptionMetricsHook(unittest.TestCase):
+    """Change D: log_norm_adoption fires at the adoption decision site,
+    observation-only (a metrics failure must never touch the sim path)."""
+
+    def _run(self, persona, save_tag, new_norm=None):
+        from norm import norm_evaluate
+        result = (save_tag, new_norm if new_norm is not None else _accepted_norm())
+        with patch.object(norm_evaluate, "norm_evaluate_check",
+                          lambda *a, **k: result):
+            norm_evaluate.norms_evaluate(persona, {})
+
+    def test_accepted_norm_logged(self):
+        class FakeMetrics:
+            def __init__(self):
+                self.calls = []
+
+            def log_norm_adoption(self, **kw):
+                self.calls.append(kw)
+
+        metrics = FakeMetrics()
+        persona, seed = _adoption_persona(metrics)
+        self._run(persona, True)
+        self.assertEqual(len(metrics.calls), 1)
+        call = metrics.calls[0]
+        self.assertTrue(call["accepted"])
+        self.assertEqual(call["agent_name"], "Carlos Gomez")
+        self.assertEqual(call["agent_identity"], "citizen")
+        self.assertEqual(call["norm_content"], "No smoking indoors.")
+        # the norm was actually adopted
+        self.assertEqual(len(persona.norm_database.added), 1)
+
+    def test_rejected_norm_logged(self):
+        class FakeMetrics:
+            def __init__(self):
+                self.calls = []
+
+            def log_norm_adoption(self, **kw):
+                self.calls.append(kw)
+
+        metrics = FakeMetrics()
+        persona, seed = _adoption_persona(metrics)
+        self._run(persona, False)
+        self.assertEqual(len(metrics.calls), 1)
+        self.assertFalse(metrics.calls[0]["accepted"])
+        self.assertEqual(persona.norm_database.added, [])
+
+    def test_raising_collector_does_not_break_adoption(self):
+        class BoomMetrics:
+            def log_norm_adoption(self, **kw):
+                raise RuntimeError("boom")
+
+        persona, seed = _adoption_persona(BoomMetrics())
+        self._run(persona, True)  # must not raise
+        self.assertEqual(len(persona.norm_database.added), 1)
+
+    def test_missing_metrics_attribute_is_fine(self):
+        persona, seed = _adoption_persona(metrics=None)
+        self.assertFalse(hasattr(persona, "metrics"))
+        self._run(persona, True)  # must not raise
+        self.assertEqual(len(persona.norm_database.added), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -648,3 +648,52 @@ CRSEC_NUM_PREDICT unset) and watch truncated_* ≈ 0.
 Data basis: `calib_artifacts/calib_008/calls.jsonl` per-fn length stats
 (p50/p95/p99/max) computed by the attribution script; see the analysis table
 in the Pass 2 session notes / length_stats.json.
+
+### Phase 0 audit + Change D — metrics wiring (`norm/norm_evaluate.py`)
+
+Phase 0 verdicts for calib_008's all-zero summary.json (static call sites +
+dynamic evidence from the artifacts):
+
+| metric | wired? | calib_008 ground truth | verdict |
+|---|---|---|---|
+| defection_* | yes (`calculate_defection_utility`; callers pass `persona.metrics`) | 0 defectors in the population | genuinely zero |
+| violations_detected | yes (`process_violations` ← `getattr(persona,'metrics',None)`, non-None: set at reverie.py:169) | 25 checks (5 LLM + 20 cached), all verdicts `violation: False`; the 5 log hits of `"violation": true` are prompt echoes | genuinely zero |
+| confront/gossip/ignore | yes (same site) | no violations → never ran | genuinely zero |
+| norms_adopted/rejected | **NO — `log_norm_adoption` had zero call sites** | zero seeds created in 200 steps: all 15 NormSeedNode/ActNormNode prints are load-time bootstrap (log lines 5–67); saved norm_count/act_norm_count identical to base_ville_n10_with_norm for all 10 personas. Root cause: norm_format parser failed 100% (Change A), killing every seed pre-adoption | wiring gap AND genuinely zero |
+| compliance_timeline | populated (state reader) | constant 1.0 / 15 active norms | see note below |
+
+Compliance note: `_snapshot_compliance` reads `activation_state`/`validity_state`.
+`validity_state` is set True at adoption and never updated anywhere — and it
+FEEDS BACK into the sim (`normDatabase.retrieve_norms` filters on it), so
+"wiring a compliance update" there would alter behavior, i.e. it is NOT
+eligible for an observation-only hook. Defector comply/defect decisions are
+already captured (wired defection_log → population_stats
+defect/comply_decisions_this_step). Citizens have no explicit compliance
+decision site — compliance is implicit in plan generation. No change made,
+by design.
+
+Change D therefore wires exactly the one missing hook: `_log_norm_adoption`
+(guarded getattr/hasattr + try/except, observation-only) called immediately
+after `norm_evaluate_check` at BOTH adoption decision sites in
+norm_evaluate.py — the immediate path in `norms_evaluate` and the long-term
+synthesis path in `run_long_term_norm_evaluate`. It logs accepted AND
+rejected decisions; `norm.poignancy` at that point carries the utility score
+on accept or the rejection code (-2 fact / -3 duplicate / -4 name) on
+reject. Receiver-side adoption via conversation spreading flows through the
+same `norms_evaluate` path (chat reflect → add_norm_seed → next-step
+evaluation), so it is covered by the same hook. `init_evaluate` has no
+callers (dead code) and load-time bootstrap adoption does not pass through
+the instrumented sites — bootstrap loads are not adoption events.
+
+Tests (4 new, in test_modifications.py): accepted logged, rejected logged,
+raising collector cannot break adoption, absent `persona.metrics` is a no-op.
+Suite: 122 passed, 1 deselected (pre-existing 462a1a6 failure).
+
+Expected in a calib_009-like run (10 personas, no defectors, Change A live):
+- `total_norms_adopted` / `total_norms_rejected` — nonzero as soon as any
+  reflection survives norm_format (calib_008 had 71 reflections + 10 chat
+  reflections that all died at the parser).
+- `norm_adoption_log.json` — one entry per evaluation decision.
+- Legitimately still zero in a defector-free baseline: defection_*,
+  and violations/enforcement unless an adopted norm actually gets violated
+  (violation checks fired only 25x after prefilter in calib_008).
