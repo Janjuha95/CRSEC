@@ -245,33 +245,47 @@ def specific_norm_deactive(persona, desc):
 
 def run_long_term_norm_evaluate(persona, personas):
     '''
+    Transactional synthesis: an active norm may only be deactivated AFTER its
+    synthesized replacement has fully passed evaluation and been added to the
+    database (deactivate-last). Any failed replacement leaves the originals
+    active and increments `synthesis_aborted`. Norm erosion is the thesis's
+    dependent variable — it must never be manufacturable by a parser failure.
     Args:
         persona:
     '''
     classficated_norm, tag = generate_active_norms_classfication(persona)
     if tag == False:
+        call_profiler.incr("synthesis_aborted")
         return
     classficated_checked_norm, norm_tag, desc = norm_long_term_synthesis_check(classficated_norm+'\n')
     if norm_tag:
         act_norm = generate_norm_long_term_synthesis(classficated_checked_norm)
         if act_norm == False or len(act_norm) != len(desc):
             print("run_long_term_norm_evaluate stoped")
+            call_profiler.incr("synthesis_aborted")
             return
         for i in range(len(act_norm)):
             norm_node = generate_format_norm(act_norm[i], desc[i])
             if norm_node == None:
+                call_profiler.incr("synthesis_aborted")
                 continue
             persona.norm_database.add_norm_seed(norm_node)
             save_tag, new_norm = norm_evaluate_check(norm_node, persona, personas, long_term_tag=True)
             _log_norm_adoption(persona, norm_node, save_tag)
             if save_tag:
-                specific_norm_deactive(persona, desc[i])
                 new_norm.activation_state = True
                 norm_node.activation_state = True
                 new_norm.validity_state = True
                 norm_node.validity_state = True
                 persona.norm_database.add_act_norm(new_norm)
+                # deactivate-last: the replaced specifics go inactive only
+                # once the verified replacement is in the database
+                specific_norm_deactive(persona, desc[i])
                 persona.scratch.norm_evaluate_trigger_curr -= new_norm.poignancy
+            else:
+                # deferred (None) or rejected (False) replacement: the
+                # original active norms stay untouched
+                call_profiler.incr("synthesis_aborted")
 
 
 def reset_norm_norm_evaluate_counter(persona):

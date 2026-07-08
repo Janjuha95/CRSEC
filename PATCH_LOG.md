@@ -785,3 +785,31 @@ the length-2 failure shape); discrimination happens at the consumer via the
 reason marker. 8 new tests (all-parsed identical behavior; per-stage
 failure→defer; per-stage verdict→reject; deferral emits no metrics event).
 Suite: 130 passed, 1 deselected.
+
+### Change C (pass 3) — transactional long-term synthesis (`norm/norm_evaluate.py`)
+
+Phase 0-B showed no erosion actually occurred in calib_009 (the long-term
+path never even triggered), but the ordering hazard was real: on a
+successful check the code deactivated the replaced specifics BEFORE adding
+the replacement. run_long_term_norm_evaluate now:
+- adds the verified replacement to the database first, then deactivates the
+  specifics it replaces (deactivate-last); end state on the all-parsed path
+  is byte-identical to before (both operations are independent state writes);
+- increments `synthesis_aborted` on every failure path — classification
+  fail, synthesis-check "stoped" (False / length mismatch), format→None per
+  item, and a deferred (None) or rejected (False) replacement per item — and
+  in all those cases the original active norms stay untouched.
+3 new tests: success ordering (add_act before deactivate, trigger
+decremented, no abort counter), rejected and deferred replacements leave
+originals active + count aborts. Suite: 133 passed, 1 deselected.
+
+### Change D (pass 3) — violation_log norm content: VERIFIED NO-OP, no commit
+
+The premise ("norm_content: None") is refuted by the calib_009 data: all 42
+violation_log entries, all 42 enforcement_log entries, and every
+persona-side observed_violations record (Bob x30, Francisco x12) carry the
+real norm content string and norm_id. The single log_violation call site
+(violation_detection.py, `norm_content=getattr(norm_obj, "content", None)`)
+resolves `.content` on live NormNode objects. Nothing to fix; no commit made
+(fabricating a change to satisfy the commit list would be worse than
+reporting the truth).

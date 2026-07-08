@@ -841,5 +841,76 @@ class TestEvalDeferral(unittest.TestCase):
         self.assertEqual(norm.poignancy, -1)
 
 
+class TestTransactionalSynthesis(unittest.TestCase):
+    """Pass 3 Change C: long-term synthesis deactivates a replaced norm only
+    AFTER its verified replacement is in the database; a failed replacement
+    leaves the originals active."""
+
+    def _run(self, save_tag):
+        from contextlib import ExitStack
+
+        from norm import norm_evaluate
+        from norm.normNode import NormNode
+
+        events = []
+        counters = []
+        persona = _NS()
+        persona.scratch = _NS()
+        persona.scratch.norm_evaluate_trigger_curr = 100
+        persona.norm_database = _NS()
+        persona.norm_database.add_norm_seed = \
+            lambda n: events.append(("seed", n))
+        persona.norm_database.add_act_norm = \
+            lambda n: events.append(("add_act", n))
+
+        node = NormNode(1, "injunctive", "Keep noise low.", "everyone",
+                        "keeps", "noise low")
+        replacement = NormNode(2, "injunctive", "Keep noise low.", "everyone",
+                               "keeps", "noise low", poi=60)
+
+        stages = dict(
+            generate_active_norms_classfication=lambda p: ("CLS", True),
+            norm_long_term_synthesis_check=lambda s: ("CHK", True, ["group-1"]),
+            generate_norm_long_term_synthesis=lambda s: ["synth-norm-1"],
+            generate_format_norm=lambda s, d: node,
+            norm_evaluate_check=(
+                lambda n, p, ps, long_term_tag=False: (save_tag, replacement)),
+            specific_norm_deactive=lambda p, d: events.append(("deactivate", d)),
+        )
+        with ExitStack() as stack:
+            for name, fake in stages.items():
+                stack.enter_context(patch.object(norm_evaluate, name, fake))
+            stack.enter_context(patch.object(
+                norm_evaluate.call_profiler, "incr",
+                lambda name, n=1: counters.append(name)))
+            norm_evaluate.run_long_term_norm_evaluate(persona, {})
+        return events, counters, persona, replacement
+
+    def test_success_swaps_deactivate_last(self):
+        events, counters, persona, replacement = self._run(True)
+        kinds = [e[0] for e in events]
+        self.assertEqual(kinds, ["seed", "add_act", "deactivate"])
+        self.assertLess(kinds.index("add_act"), kinds.index("deactivate"))
+        self.assertTrue(replacement.activation_state)
+        self.assertTrue(replacement.validity_state)
+        self.assertEqual(persona.scratch.norm_evaluate_trigger_curr, 40)
+        self.assertNotIn("synthesis_aborted", counters)
+
+    def test_rejected_replacement_leaves_originals_active(self):
+        events, counters, persona, _ = self._run(False)
+        kinds = [e[0] for e in events]
+        self.assertNotIn("add_act", kinds)
+        self.assertNotIn("deactivate", kinds)
+        self.assertEqual(persona.scratch.norm_evaluate_trigger_curr, 100)
+        self.assertIn("synthesis_aborted", counters)
+
+    def test_deferred_replacement_leaves_originals_active(self):
+        events, counters, persona, _ = self._run(None)
+        kinds = [e[0] for e in events]
+        self.assertNotIn("add_act", kinds)
+        self.assertNotIn("deactivate", kinds)
+        self.assertIn("synthesis_aborted", counters)
+
+
 if __name__ == "__main__":
     unittest.main()
