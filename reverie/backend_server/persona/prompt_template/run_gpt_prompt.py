@@ -90,6 +90,164 @@ def get_random_alphanumeric(i=6, j=6):
     return x
 
 
+# ----------------------------------------------------------------------------
+# Tolerant parsers for the top failing prompt fns (calib_008 parser pass).
+# Replay-validated against every captured calib_008 response; kept at module
+# level so the replay test can import and re-run them against logged data.
+# ----------------------------------------------------------------------------
+
+def _primed_triple_subject(prompt):
+    """Subject already consumed by the template's final 'Output: (SUBJ,' line."""
+    m = re.findall(r"Output: \((.*?),\s*$", prompt)
+    return m[-1].strip() if m else None
+
+
+def _parse_event_triple_completion(gpt_response, prompt=""):
+    """Parse the (predicate, object) completion of an event-triple prompt.
+
+    The template primes "Output: (SUBJ," and GPT-instruct completed just
+    "pred, obj)". Qwen3 instead re-emits the whole triple
+    "(SUBJ, pred, obj)" — in calib_008 it did so on 100% of calls, so every
+    event fail-safed to ('X','is','idle'). Drop the echoed subject, and fold
+    any extra commas into the object slot.
+    """
+    cr = _strip_scaffolding(gpt_response).strip().strip('"\'')
+    if cr.startswith("("):
+        cr = cr[1:]
+    cr = cr.split(")")[0]
+    for sep in (" //", " --"):
+        if sep in cr:
+            cr = cr[:cr.index(sep)]
+    parts = [i.strip().strip('"\'') for i in cr.split(",")]
+    parts = [p for p in parts if p]
+    subj = _primed_triple_subject(prompt)
+    if len(parts) > 2 and subj:
+        s0, s1 = parts[0].lower(), subj.lower()
+        if s0 == s1 or s0 in s1 or s1 in s0:
+            parts = parts[1:]
+    if len(parts) > 2:
+        parts = [parts[0], ", ".join(parts[1:])]
+    if len(parts) != 2:
+        raise ValueError(f"event_triple: cannot reduce to (pred, obj): {parts!r}")
+    return parts
+
+
+# One schedule line: "[**]HH:MM[ AM] ~ HH:MM[ AM][**] <dash/colon> action".
+# Qwen3 wraps times in markdown bold and separates with unicode dashes
+# instead of the template's literal " -- ".
+_SCHED_LINE = re.compile(
+    r"^[\s>*#-]*\**\s*"
+    r"(\d{1,2}:\d{2})\s*(?:AM|PM|am|pm)?\s*"
+    r"[~‒–—-]+\s*"
+    r"(\d{1,2}:\d{2})\s*(?:AM|PM|am|pm)?\s*\**\s*"
+    r"[‒–—:-]*\s*"
+    r"(.+?)\s*$")
+
+
+def _sched_entries(text):
+    """All (start, end, action) datetime tuples parseable out of free text."""
+    entries = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = _SCHED_LINE.match(line)
+        if not m:
+            continue
+        action = m.group(3).strip().strip("*").strip()
+        if not action:
+            continue
+        try:
+            start_t = datetime.datetime.strptime(m.group(1), "%H:%M")
+            end_t = datetime.datetime.strptime(m.group(2), "%H:%M")
+        except ValueError:
+            continue
+        entries.append((start_t, end_t, action))
+    return entries
+
+
+def _walk_schedule_chain(entries, window_start, window_end):
+    """Greedy in-order walk of a contiguous tiling from window_start to
+    window_end. Skips restated/duplicate/annotation lines whose start does
+    not continue the chain, which also enforces the original validator's
+    sum(durations) == window contract by construction. Returns
+    [[action, minutes], ...] or None if no chain covers the window."""
+    current = window_start
+    ret = []
+    for start_t, end_t, action in entries:
+        if current == window_end:
+            break
+        if start_t != current or end_t < start_t:
+            continue
+        ret.append([action, int((end_t - start_t).total_seconds() / 60)])
+        current = end_t
+    if ret and current == window_end:
+        return ret
+    return None
+
+
+def _parse_new_decomp_schedule(gpt_response, prompt=""):
+    """Parse a revised schedule out of a new_decomp_schedule response.
+
+    Qwen3 answers in three shapes: (1) a full markdown restatement of the
+    revised schedule, (2) a mid-line completion of the prompt's dangling
+    "HH:MM ~" line, (3) standalone lines restarting at the dangling time.
+    Try each; a result is only accepted when it tiles the scheduling window
+    exactly (same contract the original " -- " parser + validator enforced).
+    """
+    x = prompt.split("\n")[0].split("originally planned schedule from")[-1].strip()[:-1]
+    x = [datetime.datetime.strptime(i.strip(), "%H:%M %p") for i in x.split(" to ")]
+    window_start = datetime.datetime.strptime(x[0].strftime("%H:%M"), "%H:%M")
+    window_end = datetime.datetime.strptime(x[1].strftime("%H:%M"), "%H:%M")
+
+    resp = gpt_response.strip()
+    ret = _walk_schedule_chain(_sched_entries(resp), window_start, window_end)
+    if ret is not None:
+        return ret
+    for glue, r in ((" ", resp.lstrip("~ \t")), ("\n", resp)):
+        text = (prompt + glue + r).split("The revised schedule:")[-1].strip()
+        ret = _walk_schedule_chain(_sched_entries(text), window_start, window_end)
+        if ret is not None:
+            return ret
+    raise ValueError("new_decomp: no contiguous schedule covers the window")
+
+
+def _parse_focal_pt_candidate(candidate):
+    """Focal-point questions from a list, a str-encoded list, or free lines.
+
+    ChatGPT_safe_generate_response's envelope extraction already returns the
+    decoded {"output": [...]} payload — a Python list — which the previous
+    str-only parser rejected on 100% of calib_008 envelope responses.
+    """
+    if isinstance(candidate, list):
+        ret = [str(q).strip() for q in candidate if str(q).strip()]
+        if not ret:
+            raise ValueError("focal_pt: empty list")
+        return ret
+    if not isinstance(candidate, str):
+        raise ValueError(f"focal_pt: unexpected type {type(candidate).__name__}")
+    s = _strip_scaffolding(candidate).strip()
+    if s.startswith("["):
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                return _parse_focal_pt_candidate(parsed)
+        except Exception:
+            pass
+    ret = []
+    for line in s.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[\-\*•]\s*", "", line)
+        line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+        if line:
+            ret.append(line)
+    if not ret:
+        raise ValueError("focal_pt: empty parse")
+    return ret
+
+
 ##############################################################################
 # CHAPTER 1: Run GPT Prompt
 ##############################################################################
@@ -1252,25 +1410,14 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        # GPT-4: "(predicate, object)". Qwen3 may omit parens, wrap in
-        # "Answer: (..)", quote elements, or append prose after "//".
-        # Strip scaffolding + outer quotes, stray leading "(", trailing prose,
-        # then element-level quotes — without loosening any other parser.
-        cr = _strip_scaffolding(gpt_response).strip().strip('"\'')
-        if cr.startswith("("):
-            cr = cr[1:]
-        cr = cr.split(")")[0]
-        for sep in (" //", " --"):
-            if sep in cr:
-                cr = cr[:cr.index(sep)]
-        cr = [i.strip().strip('"\'') for i in cr.split(",")]
-        return cr
+        # Qwen3 re-emits the full "(subject, predicate, object)" triple
+        # (100% of calib_008 calls) instead of completing "(SUBJ,". The
+        # shared parser drops the echoed subject using the primed prompt.
+        return _parse_event_triple_completion(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt="")
-            if len(gpt_response) != 2:
-                return False
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -1427,17 +1574,13 @@ def run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona, 
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = _strip_scaffolding(gpt_response).strip()
-        if cr.startswith("("):
-            cr = cr[1:]
-        cr = [i.strip() for i in cr.split(")")[0].split(",")]
-        return cr
+        # Same Qwen3 full-triple echo as run_gpt_prompt_event_triple (the two
+        # fns share the template); the primed subject here is the game object.
+        return _parse_event_triple_completion(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt="")
-            if len(gpt_response) != 2:
-                return False
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -1519,42 +1662,15 @@ def run_gpt_prompt_new_decomp_schedule(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        new_schedule = prompt + " " + gpt_response.strip()
-        new_schedule = new_schedule.split("The revised schedule:")[-1].strip()
-        new_schedule = new_schedule.split("\n")
-
-        ret_temp = []
-        for i in new_schedule:
-            ret_temp += [i.split(" -- ")]
-
-        ret = []
-        for time_str, action in ret_temp:
-            start_time = time_str.split(" ~ ")[0].strip()
-            end_time = time_str.split(" ~ ")[1].strip()
-            delta = datetime.datetime.strptime(end_time, "%H:%M") - datetime.datetime.strptime(start_time, "%H:%M")
-            delta_min = int(delta.total_seconds() / 60)
-            if delta_min < 0: delta_min = 0
-            ret += [[action, delta_min]]
-
-        return ret
+        # Chain-walk parser: tolerates Qwen3's markdown restatement (unicode
+        # dashes, bold times, prose headers) and both completion styles of the
+        # dangling "HH:MM ~" line. Only accepts a schedule that tiles the
+        # window exactly, which subsumes the old validator's duration check.
+        return _parse_new_decomp_schedule(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt)
-            dur_sum = 0
-            for act, dur in gpt_response:
-                dur_sum += dur
-                if str(type(act)) != "<class 'str'>":
-                    return False
-                if str(type(dur)) != "<class 'int'>":
-                    return False
-            x = prompt.split("\n")[0].split("originally planned schedule from")[-1].strip()[:-1]
-            x = [datetime.datetime.strptime(i.strip(), "%H:%M %p") for i in x.split(" to ")]
-            delta_min = int((x[1] - x[0]).total_seconds() / 60)
-
-            if int(dur_sum) != int(delta_min):
-                return False
-
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -2511,23 +2627,10 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        # GPT-4 emits "1) Q1\n2) Q2\n...". Qwen3 may emit "1. Q1", "- Q1", or
-        # bare lines. Strip scaffolding, then accept any numbered/bulleted
-        # form.
-        s = _strip_scaffolding(gpt_response).strip()
-        ret = []
-        for line in s.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # remove "1)", "1.", "-", "*", "•" leading markers
-            line = re.sub(r"^[\-\*•]\s*", "", line)
-            line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
-            if line:
-                ret.append(line)
-        if not ret:
-            raise ValueError("focal_pt: empty parse")
-        return ret
+        # Accepts a decoded {"output": [...]} list (what the envelope
+        # extraction actually hands over), a str-encoded list, or
+        # numbered/bulleted lines.
+        return _parse_focal_pt_candidate(gpt_response)
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2541,12 +2644,13 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        ret = ast.literal_eval(gpt_response)
-        return ret
+        # ast.literal_eval alone rejected every already-decoded list payload
+        # (54/72 calib_008 responses); the shared parser handles all shapes.
+        return _parse_focal_pt_candidate(gpt_response)
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False

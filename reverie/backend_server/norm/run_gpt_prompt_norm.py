@@ -168,25 +168,82 @@ def run_gpt_prompt_norm_reflect_from_thoughts(reletive_thoughts, verbose=False):
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
 
 
+def _parse_norm_format_json(gpt_response):
+    """Parse a norm-format response into the {"norm_1": {...}} dict that
+    generate_format_norm consumes.
+
+    Deliberately does NOT use _strip_scaffolding: its "drop a leading '{'
+    with no '}' on the first line" heuristic beheads multi-line JSON, which
+    made the old first-{-to-last-} slice unbalanced and failed 100% of
+    calib_008 calls (killing every norm seed). raw_decode reads the first
+    complete JSON value; a brace-balancing retry recovers truncated output.
+    Module-level so replay tests can import it.
+    """
+    s = gpt_response.strip() if isinstance(gpt_response, str) else ""
+    # peel a code fence without touching braces
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+    if "OUTPUT:" in s:
+        s = s.split("OUTPUT:")[-1].strip()
+    first = s.find("{")
+    if first == -1:
+        raise ValueError("norm_format: no JSON object in response")
+    tail = s[first:]
+    try:
+        j, _ = json.JSONDecoder().raw_decode(tail)
+    except json.JSONDecodeError:
+        # truncated JSON: cut back to the last complete "}", close the
+        # remaining open braces, drop a dangling comma
+        j = None
+        for cut in range(len(tail), 0, -1):
+            if tail[cut - 1] == "}":
+                cand = tail[:cut]
+                opens = cand.count("{") - cand.count("}")
+                if opens > 0:
+                    cand = cand + "}" * opens
+                cand = re.sub(r",\s*}", "}", cand)
+                try:
+                    j, _ = json.JSONDecoder().raw_decode(cand)
+                    break
+                except json.JSONDecodeError:
+                    continue
+        if j is None:
+            raise ValueError("norm_format: unrecoverable JSON")
+    if not isinstance(j, dict):
+        raise ValueError("norm_format: not a dict")
+    # normalize alternative top-level shapes to {"norm_1": {...}}
+    if "norm_1" not in j:
+        if "content" in j:                      # bare norm object
+            j = {"norm_1": j}
+        else:                                   # e.g. {"norm": {...}}
+            for v in j.values():
+                if isinstance(v, dict) and "content" in v:
+                    j = {"norm_1": v}
+                    break
+            else:
+                raise ValueError("norm_format: no norm object found")
+    # generate_format_norm indexes these keys; missing ones must fail HERE so
+    # the repeat loop retries instead of silently dropping the seed
+    norm = j["norm_1"]
+    for k in ("ID", "type", "content", "subject", "predicate", "object"):
+        if k not in norm:
+            raise ValueError(f"norm_format: missing key {k}")
+    return j
+
+
 def run_gpt_prompt_norm_format(norm_str, verbose=False):
     def create_prompt_input(norm_str):
         prompt_input = [norm_str]
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-
         print(gpt_response)
-        # Qwen3 may wrap JSON in ```json fences. Strip and look for the
-        # first {...} dict if "OUTPUT:" marker is missing.
-        s = _strip_scaffolding(gpt_response)
-        if "OUTPUT:" in s:
-            s = s.split('OUTPUT:')[-1].strip()
-        # If still not pure JSON, slice from first { to last }.
-        first = s.find("{")
-        last = s.rfind("}")
-        if first != -1 and last != -1 and last > first:
-            s = s[first:last + 1]
-        j = json.loads(s)
+        j = _parse_norm_format_json(gpt_response)
         print(type(j))
         print(j)
         return j

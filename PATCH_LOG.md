@@ -542,3 +542,43 @@ fail-safe.
   `pronunciatio_stub` counter rename.
 - `reverie/backend_server/tests/test_optimizations.py` — Part B/C tests + routing
   test updates.
+
+---
+
+## 2026-07-08 — Pass 2 on calib_008 data: parsers, norm routing, caps v2, metrics wiring
+
+Branch `norm_deflection`, on top of `462a1a6`. Driven by the calib_008
+artifacts (200 steps, non-thinking models, 2,249 captured calls in
+`calib_artifacts/calib_008/calls.jsonl`). Calls were attributed to prompt fns
+by fingerprinting each fn's template's static text; attribution matches
+profile.json call counts exactly for all 29 fns with calls.
+
+### Change A — top-5 failing parsers (`run_gpt_prompt.py`, `run_gpt_prompt_norm.py`)
+
+calib_008 ground truth: retry counters EQUAL call counts for four fns — they
+failed on 100% of attempts and always returned fail_safe.
+
+| fn | failure mode (from captured responses) | fix (parser-side only) |
+|---|---|---|
+| event_triple (396 calls, 132 fail_safe) | Qwen3 re-emits the full `(subject, predicate, object)` although the template primes `"Output: (SUBJ,"`; parser demanded exactly 2 elements → every event flattened to `('X','is','idle')` | `_parse_event_triple_completion`: drop the echoed subject (matched against the primed subject read back from the prompt), fold extra commas into the object slot |
+| act_obj_event_triple (170, 34) | same (shared template; subject = game object) | same helper |
+| norm_format (75, 25) | responses are VALID JSON; `_strip_scaffolding`'s "drop leading `{` with no `}` on line 1" heuristic beheads multi-line JSON, making the first-{-to-last-} slice unbalanced → 100% failure → **every norm seed of the run silently dropped** (this, not metrics wiring, is why RQ1/RQ3 were empty) | `_parse_norm_format_json`: no scaffolding strip; `raw_decode` of the first complete JSON value; brace-balancing recovery for truncated output; normalizes `{"norm_1": ...}` / bare-object / wrapper shapes; missing required keys now fail in clean_up so the repeat loop retries instead of `generate_format_norm` silently returning None |
+| new_decomp_schedule (90, 18) | markdown restatement (`**09:00 ~ 09:30** —` unicode dashes, prose headers, annotation lines) vs required literal `" -- "` split | `_parse_new_decomp_schedule`: regex line scan + greedy chain-walk that only accepts a contiguous tiling of the scheduling window (subsumes the old sum-of-durations validator); handles full-restatement, mid-line completion, and standalone-restart response shapes |
+| focal_pt (72, 18) | model returns a perfect `{"output": [...]}`; the envelope extraction hands the parser a decoded **list**, which both the str-only tolerant parser and `ast.literal_eval` rejected | `_parse_focal_pt_candidate`: accepts list / str-encoded list / numbered lines; used by both chat and fallback paths |
+
+Replay acceptance (script: `reverie/backend_server/tests/replay_calib_parsers.py`,
+run against all captured calib_008 responses through the shipped source parsers):
+
+| fn | old pass rate | new pass rate |
+|---|---|---|
+| event_triple | 0% | **396/396 = 100%** |
+| act_obj_event_triple | 0% | **170/170 = 100%** |
+| norm_format | 0% | **75/75 = 100%** |
+| new_decomp_schedule | 0% | **85/90 = 94.4%** (residual = ONE degenerate response × its 5 retries: model emitted 18 min of a 120-min window then em-space padding — nothing to parse; fail_safe reconstruction is correct. 85/85 responses containing a full schedule parse.) |
+| focal_pt | 25% | **72/72 = 100%** |
+
+No prompt template was changed. `_strip_scaffolding` itself was NOT modified
+(shared by validated parsers); norm_format simply stopped using it.
+Full test suite: 116 passed, 1 deselected (`test_options_pin_temperature_and_num_ctx`
+— pre-existing failure introduced by `462a1a6`'s think-block change, fails on a
+clean checkout too; not touched here as the think block is validated behavior).
