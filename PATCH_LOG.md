@@ -697,3 +697,59 @@ Expected in a calib_009-like run (10 personas, no defectors, Change A live):
 - Legitimately still zero in a defector-free baseline: defection_*,
   and violations/enforcement unless an adopted norm actually gets violated
   (violation checks fired only 25x after prefilter in calib_008).
+
+---
+
+## 2026-07-08 — Pass 3 on calib_009 data: unblock adoption, non-destructive evaluation, transactional synthesis
+
+Branch `norm_deflection`, on top of `e61bb40`. Driven by calib_009 (200
+steps, 24.3 s/step, 2,986 calls). Phase 0 verdicts that shaped the changes:
+
+- Adoption chain: −1×188 in the adoption log == fail_safe_run_gpt_seeds_type_check_v2
+  (564 calls = 188 loops × 3, retry counter == call count → 100% attempt
+  failure). −2×11 (fact-consistency) and −3×11 (duplicate) are GENUINE parsed
+  rejections (their 295/199 calls parsed with zero retries). norm_utility and
+  the conflict check never executed — the chain died at the type check.
+  seeds_type_check(v1), seeds_content_check and norm_utility(v2) are
+  unreachable dead code: their prompt template files do not exist on disk.
+- Active-norm "collapse 5→0 for 7 personas": REFUTED. The 7 citizens loaded
+  with NO norm databases ("personal_norm_database.json could not find") and 0
+  actives; actives were constant at 15 (3 entrepreneurs × 5) at steps 100 and
+  200; specific_norm_deactive never executed (long-term synthesis never
+  triggered — its trigger only decrements on successful adoption, and there
+  were 0). The "collapse" misread the saved SEED database, where
+  created-but-never-adopted seeds carry activation_state=false.
+- 4 truncations on seeds_type_check_v2: the intended 4096 blanket cap doing
+  its job — the model occasionally rambles (max response 18,710 chars ≈ 5.3k
+  tokens); markers sit at the top, so truncated rambles still parse.
+- violation_log norm_content=None: REFUTED — all 42 violation_log entries,
+  42 enforcement entries and all persona observed_violations carry the real
+  norm content. The pass-2 call site works; no change made (planned Change D
+  dropped as a verified no-op).
+
+### Change A (pass 3) — seeds_type_check_v2 parser (`norm/run_gpt_prompt_norm.py`)
+
+Root cause: the template's final instruction line demands <"..."> wrapping
+but its own EXAMPLES show the type in plain quotes; Qwen3 follows the
+examples ('The type classification for INPUT is "descriptive"'), so the
+parser's literal '<"' marker split failed on 564/564 calls. New module-level
+`_parse_seeds_type_check`: three tolerant regexes (STEP 1 yes/no, STEP 2
+correct/incorrect, type classification descriptive/injunctive) accepting
+<">, plain quotes, bold or bare tokens; last occurrence wins (mirrors the
+old split()[-1] semantics). No template change.
+
+Siblings checked against calib_009 data: fact_consistency (295 calls,
+199 yes/96 no, 0 no-parse) and duplicate_check (199 calls, 188 no/11 yes,
+0 no-parse) parse cleanly — no changes. recognize_conflict_check and
+specific_norm_utility have zero calib_009 calls (never reached); their
+failure handling is covered by pass-3 Change B instead of speculative
+parser edits.
+
+Replay (tests/replay_calib_parsers.py, now covering the seed-evaluation
+chain, run against BOTH bundles):
+- calib_009: seeds_type_check_v2 564/564 (was 0), duplicate 199/199,
+  fact_consistency 295/295; pass-2 fns 100% each (126/126, 38/38, 240/240,
+  16/16, 24/24) — the pass-2 fixes held in the wild.
+- calib_008 regression: unchanged (100/100/100/94.4/100; the 94.4 residual
+  is the known single degenerate response × 5 retries).
+Suite: 122 passed, 1 deselected (pre-existing 462a1a6 failure).

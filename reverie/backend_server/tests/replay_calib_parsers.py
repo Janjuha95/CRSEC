@@ -33,6 +33,10 @@ from collections import defaultdict
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO = os.path.dirname(os.path.dirname(BACKEND))
 sys.path.insert(0, BACKEND)
+# Resolve a relative calls.jsonl argument against the caller's cwd BEFORE
+# chdir-ing into backend_server (templates are read via relative paths).
+if len(sys.argv) > 1:
+    sys.argv[1] = os.path.abspath(sys.argv[1])
 os.chdir(BACKEND)
 
 from persona.prompt_template.run_gpt_prompt import (  # noqa: E402
@@ -40,7 +44,13 @@ from persona.prompt_template.run_gpt_prompt import (  # noqa: E402
     _parse_new_decomp_schedule,
     _parse_focal_pt_candidate,
 )
-from norm.run_gpt_prompt_norm import _parse_norm_format_json  # noqa: E402
+from persona.prompt_template.gpt_structure import (  # noqa: E402
+    _strip_scaffolding, _extract_yes_no,
+)
+from norm.run_gpt_prompt_norm import (  # noqa: E402
+    _parse_norm_format_json,
+    _parse_seeds_type_check,
+)
 
 # fn -> active template(s). event_triple and act_obj_event_triple share one
 # template and are split on whether the primed subject is a persona name.
@@ -50,6 +60,11 @@ FN_TEMPLATES = {
     "run_gpt_prompt_focal_pt": ["persona/prompt_template/v3_ChatGPT/generate_focal_pt_v1.txt",
                                 "persona/prompt_template/v2/generate_focal_pt_v1.txt"],
     "run_gpt_prompt_norm_format": ["norm/norm_identify_prompt/identify_norm_save_v3.txt"],
+    # seed-evaluation chain (calib_009 coverage; zero calls in calib_008)
+    "run_gpt_seeds_type_check_v2": ["norm/norm_evaluate_prompt/seeds_type_check_v3.txt"],
+    "run_gpt_norm_duplicate_check": ["norm/norm_evaluate_prompt/duplicate_check_v1.txt"],
+    "run_gpt_norm_fact_consistency_check": ["norm/norm_evaluate_prompt/fact_consistency_check_v1.txt"],
+    "run_gpt_norm_recognize_conflict_check": ["norm/norm_evaluate_prompt/recognize_conflict_check_v1.txt"],
 }
 
 
@@ -105,6 +120,23 @@ def _focal_pt(resp, prompt):
     return _parse_focal_pt_candidate(resp)
 
 
+def _yes_no_after_answer(resp):
+    """Replica of the fact_consistency / recognize_conflict closure logic."""
+    s = _strip_scaffolding(resp)
+    seg = s.split("Answer: ")[-1] if "Answer: " in s else s
+    m = re.search(r"\b(yes|no)\b", seg.lower())
+    if m is None:
+        raise ValueError("no yes/no verdict")
+    return m.group(1)
+
+
+def _duplicate_check(resp, prompt):
+    yn = _extract_yes_no(resp)
+    if yn is None:
+        raise ValueError("no yes/no verdict")
+    return yn
+
+
 REPLAYS = {
     "run_gpt_prompt_event_triple":
         lambda r, p: _parse_event_triple_completion(r, p),
@@ -114,6 +146,13 @@ REPLAYS = {
     "run_gpt_prompt_new_decomp_schedule":
         lambda r, p: _parse_new_decomp_schedule(r, p),
     "run_gpt_prompt_focal_pt": _focal_pt,
+    "run_gpt_seeds_type_check_v2":
+        lambda r, p: _parse_seeds_type_check(r),
+    "run_gpt_norm_duplicate_check": _duplicate_check,
+    "run_gpt_norm_fact_consistency_check":
+        lambda r, p: _yes_no_after_answer(r),
+    "run_gpt_norm_recognize_conflict_check":
+        lambda r, p: _yes_no_after_answer(r),
 }
 
 
@@ -144,6 +183,9 @@ def main():
     failed = False
     for fn, parser in REPLAYS.items():
         recs = by_fn[fn]
+        if not recs:
+            print(f"  [SKIP] {fn:50s} no calls in this bundle")
+            continue
         ok, errs = 0, []
         for c in recs:
             try:
@@ -151,7 +193,7 @@ def main():
                 ok += 1
             except Exception as e:
                 errs.append(str(e)[:100])
-        rate = 100.0 * ok / len(recs) if recs else float("nan")
+        rate = 100.0 * ok / len(recs)
         flag = "PASS" if rate >= 94 else "FAIL"
         failed |= flag == "FAIL"
         print(f"  [{flag}] {fn:50s} {ok}/{len(recs)}  ({rate:.1f}%)")

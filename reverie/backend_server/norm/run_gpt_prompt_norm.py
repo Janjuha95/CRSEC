@@ -841,6 +841,37 @@ def run_gpt_active_norms_classfication_v2(curr_active_norms, verbose=False):
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
 
 
+# Tolerant markers for seeds_type_check_v2 (calib_009 parser pass). The
+# template's final instruction line demands <"..."> around every answer, but
+# its own EXAMPLES show the type in plain quotes — Qwen3 follows the examples
+# ('The type classification for INPUT is "descriptive"'), so the literal
+# '<"' marker split failed on 564/564 calib_009 calls, killing every seed at
+# the type check. Each regex accepts <">, plain quotes, markdown bold, or no
+# wrapping at all; the LAST occurrence wins (mirrors the old split()[-1]).
+_TYPE_STEP1_RE = re.compile(
+    r'STEP\s*1\s*:?\s*[<\["*\'\s]*(yes|no)\b', re.IGNORECASE)
+_TYPE_STEP2_RE = re.compile(
+    r'STEP\s*2\s*:?\s*[<\["*\'\s]*(incorrect|correct)\b', re.IGNORECASE)
+_TYPE_CLASS_RE = re.compile(
+    r'type\s+classification\s+for\s+(?:the\s+)?INPUT\s+is'
+    r'\s*[:<\["*\'\s]*(descriptive|injunctive)\b', re.IGNORECASE)
+
+
+def _parse_seeds_type_check(gpt_response):
+    """[step1_yes_no, step2_correctness, type] from a type-check response.
+    Module-level so tests/replay_calib_parsers.py can replay it."""
+    if not isinstance(gpt_response, str):
+        raise ValueError("seeds_type_check: not a string")
+    m1 = _TYPE_STEP1_RE.findall(gpt_response)
+    m2 = _TYPE_STEP2_RE.findall(gpt_response)
+    m3 = _TYPE_CLASS_RE.findall(gpt_response)
+    if not (m1 and m2 and m3):
+        raise ValueError(
+            f"seeds_type_check: markers missing "
+            f"(step1={bool(m1)} step2={bool(m2)} class={bool(m3)})")
+    return [m1[-1].lower(), m2[-1].lower(), m3[-1].lower()]
+
+
 def run_gpt_seeds_type_check_v2(candidate_norm, norm_type, verbose=False):
     def create_prompt_input(candidate_norm, norm_type):
         prompt_input = [norm_type]
@@ -849,19 +880,12 @@ def run_gpt_seeds_type_check_v2(candidate_norm, norm_type, verbose=False):
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        x1 = gpt_response.split('STEP 1: <"')[-1].split('"')[0].lower()
-        x2 = gpt_response.split('STEP 2: <"')[-1].split('"')[0].lower()
-        x3 = gpt_response.split('The type classification for INPUT is <"')[-1].split('"')[0].lower()
-        return [x1, x2, x3]
+        return _parse_seeds_type_check(gpt_response)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split('STEP 1: <"')[-1].split('"')[0].lower() in ['yes', 'no'] and \
-                    gpt_response.split('STEP 2: <"')[-1].split('"')[0].lower() in ['incorrect', 'correct'] and \
-                    gpt_response.split('The type classification for INPUT is <"')[-1].split('"')[0].lower() in [
-                'descriptive', 'injunctive']:
-                return True
-            return False
+            _parse_seeds_type_check(gpt_response)
+            return True
         except:
             return False
 
