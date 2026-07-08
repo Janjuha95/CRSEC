@@ -893,3 +893,35 @@ detect_violations → process_violations path (patched violation-check LLM)
 must land its content string in metrics.log_violation, log_enforcement AND
 scratch.observed_violations. Passes against current code; any refactor that
 drops the attribute now fails loudly. No production change made.
+
+### Change E (pass 4) — adoption events carry parsed verdicts with real utilities only
+
+Code-level trace at current HEAD (calib_010 bundle absent locally, so the
+"19 sentinel events" could not be replayed): after pass-3 Change B, NO
+failure path can emit an adoption event (all defer, unit-proven). The only
+remaining sentinel-scored events were GENUINE parsed rejections logged with
+the norm object's bookkeeping codes: -4 name_check, -2 fact-'no'-exhausted,
+-3 duplicate-'yes', -1 type-STEP1-'no' or conflict-'yes'. Those codes stay
+on the norm object (they gate re-evaluation) but no longer leak into the
+metrics stream:
+- norm_evaluate_check marks the verdict stage on the seed
+  (norm.reject_stage ∈ name_check / fact_consistency / duplicate_check /
+  type_check_not_norm / conflict_check; cleared to None on acceptance);
+- _log_norm_adoption sends utility_score = real parsed utility for accepted
+  events and utility_score=None + reject_stage for rejections;
+- MetricsCollector.log_norm_adoption gains the reject_stage field (default
+  None; event dict now includes it).
+Observation-only: sim state and control flow untouched; the poignancy
+sentinels on the norm objects behave exactly as before.
+Tests: parsed rejections carry the right stage (4 stages asserted), accepted
+path clears the mark, rejected events log null utility + stage. Suite: 140
+passed, 1 deselected.
+
+### Change C (pass 4) — BLOCKED: calib_010 bundle not on this clone
+
+The SpecificNormUtility attribution (+ explicit prompt_fn= override on
+llm_call) and the parser fix both require the 87 captured
+call_type="norm_evaluation" responses from calib_010/calls.jsonl. Evidence-
+based rule: no parser gets rewritten against guessed output shapes. Deferred
+until the bundle is synced; pass-3's eval_deferred_utility guard means the
+current failure mode is a benign defer-and-retry, not corruption.

@@ -718,9 +718,15 @@ class TestNormAdoptionMetricsHook(unittest.TestCase):
 
         metrics = FakeMetrics()
         persona, seed = _adoption_persona(metrics)
+        seed.poignancy = -1
+        seed.reject_stage = "type_check_not_norm"
         self._run(persona, False)
         self.assertEqual(len(metrics.calls), 1)
-        self.assertFalse(metrics.calls[0]["accepted"])
+        call = metrics.calls[0]
+        self.assertFalse(call["accepted"])
+        # rejections never carry sentinel scores; the stage says why
+        self.assertIsNone(call["utility_score"])
+        self.assertEqual(call["reject_stage"], "type_check_not_norm")
         self.assertEqual(persona.norm_database.added, [])
 
     def test_raising_collector_does_not_break_adoption(self):
@@ -789,6 +795,24 @@ class TestEvalDeferral(unittest.TestCase):
         self.assertIs(save_tag, True)
         self.assertEqual(new_norm.poignancy, 50)
         self.assertEqual(norm.poignancy, 50)
+        self.assertIsNone(norm.reject_stage)
+
+    def test_parsed_rejections_carry_reject_stage(self):
+        save_tag, _, norm = self._check(
+            generate_norm_duplicate_check=lambda n, p: True)
+        self.assertEqual(norm.reject_stage, "duplicate_check")
+
+        save_tag, _, norm = self._check(
+            generate_norm_fact_consistency_check=lambda n: (False, ''))
+        self.assertEqual(norm.reject_stage, "fact_consistency")
+
+        save_tag, _, norm = self._check(
+            generate_seeds_type_check_v2=lambda n: [False])
+        self.assertEqual(norm.reject_stage, "type_check_not_norm")
+
+        save_tag, _, norm = self._check(
+            generate_recognize_conflict_check=lambda n, p: True)
+        self.assertEqual(norm.reject_stage, "conflict_check")
 
     def test_type_check_failure_defers(self):
         save_tag, _, norm = self._check(

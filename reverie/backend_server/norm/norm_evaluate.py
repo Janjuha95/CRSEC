@@ -12,13 +12,14 @@ def _log_norm_adoption(persona, norm, accepted):
     """Observation-only metrics hook for an adoption decision.
 
     Called right after norm_evaluate_check at both adoption sites (immediate
-    and long-term synthesis). norm.poignancy at this point carries the
-    utility score on accept, or the rejection code (-2 fact / -3 duplicate /
-    -4 name) on reject. accepted=None means the evaluation DEFERRED on a
-    parse/LLM failure — not a verdict, so no adoption event is emitted
-    (calib_009 logged 188 such failures as rejections with sentinel -1).
-    Guarded so a metrics failure can never touch the sim path;
-    persona.metrics is attached in reverie.py.
+    and long-term synthesis). accepted=None means the evaluation DEFERRED on
+    a parse/LLM failure — not a verdict, so no adoption event is emitted.
+    Accepted events carry the real parsed utility (norm.poignancy); rejected
+    events carry utility_score=None plus the stage that produced the verdict
+    (norm.reject_stage) — never the -1/-2/-3/-4 sentinel codes, which stay
+    on the norm object for the sim's own bookkeeping only. Guarded so a
+    metrics failure can never touch the sim path; persona.metrics is
+    attached in reverie.py.
     """
     if accepted is None:
         return
@@ -30,9 +31,11 @@ def _log_norm_adoption(persona, norm, accepted):
             agent_name=persona.scratch.name,
             norm_content=norm.content,
             accepted=bool(accepted),
-            utility_score=norm.poignancy,
+            utility_score=norm.poignancy if accepted else None,
             agent_identity=persona.scratch.identity,
-            step=getattr(persona.scratch, "curr_time", None))
+            step=getattr(persona.scratch, "curr_time", None),
+            reject_stage=None if accepted
+            else getattr(norm, "reject_stage", None))
     except Exception:
         pass
 
@@ -567,6 +570,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
     # Name Check
     if name_check(norm, personas):
         norm.poignancy = -4
+        norm.reject_stage = "name_check"
         return False, new_norm
 
     # Fact Consistency Check (cons_tag None = unparsed response, not a "no")
@@ -587,6 +591,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         return _defer("fact_consistency", new_norm)
     if cons_tag == False:
         norm.poignancy = -2
+        norm.reject_stage = "fact_consistency"
         return False, new_norm
 
     # Duplicate Check (None = unparsed response)
@@ -598,6 +603,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         return _defer("duplicate_check", new_norm)
     if dup:
         norm.poignancy = -3
+        norm.reject_stage = "duplicate_check"
         return False, new_norm
 
     # Type Check (None = unparsed response; [False] = parsed STEP-1 'no')
@@ -605,6 +611,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
     if type_tag is None:
         return _defer("type_check", new_norm)
     if len(type_tag) != 2:
+        norm.reject_stage = "type_check_not_norm"
         return False, new_norm
     new_norm.type = type_tag[1]
     norm.type = new_norm.type
@@ -614,6 +621,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
     if conflict is None:
         return _defer("conflict_check", new_norm)
     if conflict:
+        norm.reject_stage = "conflict_check"
         return False, new_norm
 
     # long_term_norm
@@ -627,6 +635,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
         new_norm.poi_reason = utility[1]
         norm.poignancy = new_norm.poignancy
         norm.poi_reason = new_norm.poi_reason
+        norm.reject_stage = None   # clear a stale mark from an earlier round
         return True, new_norm
 
     # normal norm
@@ -641,6 +650,7 @@ def norm_evaluate_check(norm, persona, personas, long_term_tag=False):
     new_norm.poi_reason = utility[1]
     norm.poignancy = new_norm.poignancy
     norm.poi_reason = new_norm.poi_reason
+    norm.reject_stage = None   # clear a stale mark from an earlier round
     return True, new_norm
 
 

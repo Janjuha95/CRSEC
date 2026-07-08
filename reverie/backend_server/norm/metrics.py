@@ -80,8 +80,13 @@ class MetricsCollector:
         })
 
     def log_norm_adoption(self, agent_name, norm_content, accepted,
-                          utility_score, agent_identity, step):
-        """Log when an agent evaluates and accepts/rejects a norm."""
+                          utility_score, agent_identity, step,
+                          reject_stage=None):
+        """Log when an agent evaluates and accepts/rejects a norm.
+
+        utility_score is the PARSED utility for accepted norms; rejections
+        carry None (never the -1/-2/-3/-4 sentinel codes) with reject_stage
+        naming the check that produced the verdict."""
         self.norm_adoption_log.append({
             "step": step,
             "agent": agent_name,
@@ -89,6 +94,7 @@ class MetricsCollector:
             "norm": norm_content,
             "accepted": accepted,
             "utility_score": utility_score,
+            "reject_stage": reject_stage,
             "is_antisocial": is_antisocial_norm(norm_content),
             "timestamp": time.time()
         })
