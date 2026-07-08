@@ -982,5 +982,63 @@ class TestNormLoadMismatch(unittest.TestCase):
                     normDatabase.NormDatabase(d, 5, 5, None)
 
 
+class TestViolationContentLivePath(unittest.TestCase):
+    """Pass 4 Change D: norm content must flow from a REAL NormNode through
+    detect_violations -> process_violations into the metrics logs and the
+    observer's observed_violations. Regression test for the reported (not
+    locally reproducible — calib_009 logs are fully populated) norm_content=
+    None symptom: if any refactor drops the attribute, this fails."""
+
+    def test_content_reaches_metrics_and_scratch(self):
+        from norm import violation_detection
+        from norm.normNode import NormNode
+
+        norm = NormNode(2, "injunctive", "No smoking is allowed inside the cafe.",
+                        "no one", "is allowed", "to smoke inside the cafe",
+                        poi=100, activation_state=True, validity_state=True)
+        observer = _FakePersonaForDetect("Isabella Rodriguez", {"norm_2": norm})
+
+        class FakeMetrics:
+            def __init__(self):
+                self.violations = []
+                self.enforcements = []
+
+            def log_violation(self, **kw):
+                self.violations.append(kw)
+
+            def log_enforcement(self, **kw):
+                self.enforcements.append(kw)
+
+        metrics = FakeMetrics()
+        event = _FakeEvent("Carlos Gomez", "smoking at", "the cafe counter")
+        personas = {"Isabella Rodriguez": observer, "Carlos Gomez": object()}
+
+        def fake_check(event_desc, norm_content, observer_name):
+            return [{"violation": True, "severity": 7, "certainty": 9,
+                     "response": "confront"}]
+
+        with patch.object(violation_detection, "run_gpt_prompt_violation_check",
+                          side_effect=fake_check):
+            violations = violation_detection.detect_violations(
+                observer, [event], personas)
+        self.assertEqual(len(violations), 1)
+        self.assertIs(violations[0]["norm"], norm)
+
+        violation_detection.process_violations(
+            observer, violations, personas, None, metrics)
+
+        self.assertEqual(len(metrics.violations), 1)
+        self.assertEqual(metrics.violations[0]["norm_content"],
+                         "No smoking is allowed inside the cafe.")
+        self.assertEqual(len(metrics.enforcements), 1)
+        self.assertEqual(metrics.enforcements[0]["norm_content"],
+                         "No smoking is allowed inside the cafe.")
+        ov = observer.scratch.observed_violations
+        self.assertEqual(len(ov), 1)
+        self.assertEqual(ov[0]["norm_content"],
+                         "No smoking is allowed inside the cafe.")
+        self.assertEqual(ov[0]["norm_id"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

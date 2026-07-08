@@ -874,3 +874,22 @@ Default behavior otherwise unchanged: consistent bases load exactly as
 before, zero-count personas with no files stay silent. 5 new tests (missing
 files warn ×2 counters, short file partially loads, consistent base silent,
 zero-expected silent, strict mode raises). Suite: 138 passed, 1 deselected.
+
+### Change D (pass 4) — violation content: premise NOT reproducible; regression test added
+
+Traced end-to-end: there is exactly ONE violations producer
+(detect_violations builds {"norm": <NormNode>} from the observer's act_norm
+values; process_violations reads getattr(norm, "content", None); NormNode
+carries .content; the prefilter only reads attributes). The calib_009 bundle
+on this clone has ALL 42 violation_log entries, all 42 enforcement entries
+and every observed_violations record populated with real content — the
+"norm_content: None across calib_009/010" claim does not reproduce here
+(calib_010 absent; if its 18 entries really are None on the cluster, diff
+that clone's violation_detection.py / metrics.py against ce39502+, because
+this code demonstrably populates content).
+
+Added TestViolationContentLivePath: a REAL NormNode driven through the live
+detect_violations → process_violations path (patched violation-check LLM)
+must land its content string in metrics.log_violation, log_enforcement AND
+scratch.observed_violations. Passes against current code; any refactor that
+drops the attribute now fails loudly. No production change made.
