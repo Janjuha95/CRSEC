@@ -1000,6 +1000,53 @@ def run_gpt_long_term_norm_utility(candidate_norm, related_specific_norms, relat
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
 
 
+# The utility template's examples show "- OUTPUT: <score>. Because <reason>."
+# Qwen3 wraps the marker and the score in markdown bold ("- **OUTPUT**:
+# **30**. Because ..." / "- **Because**: ..."), which broke the literal
+# 'OUTPUT: ' + int() parse on 328/341 captured calib_010+011 calls — every
+# failure deferred the seed, throttling adoption to ~3% of its rate.
+_UTILITY_OUTPUT_RE = re.compile(r"OUTPUT\**\s*:\s*")
+_UTILITY_SCORE_LINE_RE = re.compile(r"^[\s>*-]*\**(\d{1,3})\**\s*[.:]\s*(.*)$")
+
+
+def _parse_norm_utility_response(ret_str):
+    """[score, reason] from a specific-norm-utility response.
+
+    Tolerates markdown bold around the OUTPUT marker and the score, bullet
+    prefixes, and a reason continued on following lines. The last OUTPUT
+    marker wins (mirrors the old split()[-1]); without a marker, falls back
+    to a "<int>. <text>" score-line scan — never a bare first-int grab, since
+    the INPUT echo line usually contains times/numbers. Raises on no parse
+    (callers keep their shape-matched fail_safe). Module-level so
+    tests/replay_calib_parsers.py can replay it."""
+    if not isinstance(ret_str, str):
+        raise ValueError("norm_utility: not a string")
+    s = _strip_scaffolding(ret_str)
+    markers = list(_UTILITY_OUTPUT_RE.finditer(s))
+    if markers:
+        seg = s[markers[-1].end():]
+        m = re.search(r"-?\d+", seg)
+        if m is None:
+            raise ValueError(f"norm_utility: no score after OUTPUT marker: {seg[:80]!r}")
+        score = int(m.group(0))
+        reason = seg[m.end():]
+    else:
+        for line in s.split("\n"):
+            m = _UTILITY_SCORE_LINE_RE.match(line.strip())
+            if m:
+                score = int(m.group(1))
+                reason = m.group(2)
+                break
+        else:
+            raise ValueError(f"norm_utility: no OUTPUT marker or score line: {s[:80]!r}")
+    # peel "**. Because ..." / ". **Because**: ..." down to the reason text,
+    # keeping the leading "Because" as the old parser did
+    reason = reason.lstrip("*").lstrip().lstrip(".").lstrip()
+    reason = re.sub(r"^[-\s]*\**(Because)\**\s*:?\s*", r"\1 ", reason,
+                    flags=re.IGNORECASE).strip()
+    return [score, reason]
+
+
 class SpecificNormUtility:
     def __init__(self, system_msg, model="gpt-3.5-turbo-16k", temprature=0, max_tokens=4096, top_p=1,
                  frequency_penalty=0, presence_penalty=0):
@@ -1027,10 +1074,9 @@ class SpecificNormUtility:
         fail_safe = [4, "fail_safe"]
         composed = "\n\n".join(m["content"] for m in self.msg)
         try:
-            ret_str = llm_call(composed, call_type="norm_evaluation")
-            x1 = int(ret_str.split("OUTPUT: ")[-1].split('.')[0])
-            x2 = ret_str.split("OUTPUT: ")[-1].split('. ')[1]
-            return [x1, x2]
+            ret_str = llm_call(composed, call_type="norm_evaluation",
+                               prompt_fn="run_gpt_specific_norm_utility")
+            return _parse_norm_utility_response(ret_str)
         except Exception:
             return fail_safe
 

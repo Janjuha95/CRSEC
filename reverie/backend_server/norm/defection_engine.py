@@ -70,7 +70,8 @@ def calculate_defection_utility(persona, norm, context_dict, metrics=None):
 
     try:
         prompt = generate_prompt(prompt_input, DEFECTION_PROMPT)
-        response = llm_call(prompt, call_type="defection_assessment")
+        response = llm_call(prompt, call_type="defection_assessment",
+                            prompt_fn="run_gpt_defection_assessment")
     except Exception as e:
         decision, reasoning = "comply", f"Defection assessment failed ({e}); defaulting to comply."
     else:
@@ -103,7 +104,8 @@ def get_defector_norm_utility(norm_content, persona):
     fail_safe = [4, "fail_safe"]
     try:
         prompt = generate_prompt([norm_content], DEFECTOR_NORM_UTILITY_PROMPT)
-        response = llm_call(prompt, call_type="norm_evaluation")
+        response = llm_call(prompt, call_type="norm_evaluation",
+                            prompt_fn="run_gpt_defector_norm_utility")
     except Exception:
         return fail_safe
 

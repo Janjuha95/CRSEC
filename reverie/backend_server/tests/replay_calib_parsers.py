@@ -50,6 +50,7 @@ from persona.prompt_template.gpt_structure import (  # noqa: E402
 from norm.run_gpt_prompt_norm import (  # noqa: E402
     _parse_norm_format_json,
     _parse_seeds_type_check,
+    _parse_norm_utility_response,
 )
 
 # fn -> active template(s). event_triple and act_obj_event_triple share one
@@ -65,6 +66,8 @@ FN_TEMPLATES = {
     "run_gpt_norm_duplicate_check": ["norm/norm_evaluate_prompt/duplicate_check_v1.txt"],
     "run_gpt_norm_fact_consistency_check": ["norm/norm_evaluate_prompt/fact_consistency_check_v1.txt"],
     "run_gpt_norm_recognize_conflict_check": ["norm/norm_evaluate_prompt/recognize_conflict_check_v1.txt"],
+    # utility scorer (calib_010/011 coverage; direct llm_call, no run_gpt frame)
+    "run_gpt_specific_norm_utility": ["norm/norm_evaluate_prompt/specific_norm_utility_v2.txt"],
 }
 
 
@@ -153,6 +156,8 @@ REPLAYS = {
         lambda r, p: _yes_no_after_answer(r),
     "run_gpt_norm_recognize_conflict_check":
         lambda r, p: _yes_no_after_answer(r),
+    "run_gpt_specific_norm_utility":
+        lambda r, p: _parse_norm_utility_response(r),
 }
 
 

@@ -57,6 +57,11 @@ if os.environ.get("CRSEC_SUMMARIZE_ON_REASONING", "0") == "1":
 NORM_PRIMARY_OVERRIDE_FNS = {
     "run_gpt_prompt_decide_if_norm_conflict",
     "run_gpt_prompt_norm_reflect_from_thoughts",
+    # calib_011: 254 utility-scorer calls x 8.5s on the 32b (as prompt_fn
+    # "unknown") were the #1 remaining cost. Same norm-reasoning tier as the
+    # two fns above; flag=0 restores its old 32b routing exactly (it falls
+    # back to the tier-3 call_type "norm_evaluation" rule).
+    "run_gpt_specific_norm_utility",
 }
 
 # ── Tier 3: call_type-based reasoning routing (norm module direct callers) ────
@@ -123,6 +128,10 @@ PROMPT_FN_NUM_PREDICT = {
     "run_gpt_prompt_act_obj_event_triple": 105,  # p99 52; first tuple
     "run_gpt_prompt_violation_check": 64,      # p99 21; one-line 4-key json
     "run_gpt_prompt_pronunciatio": 64,         # stubbed in-sim; emoji floor
+    # calib_011 (341 captured calls incl. the calib_010 carryover): p99 4745
+    # chars ≈ 1356 tok; score+reason lead the response (top-reader), and the
+    # old "unknown" default of 1024 truncated 4 responses.
+    "run_gpt_specific_norm_utility": 2712,
     # -- blanket runaway protection: NOT truncation-safe (bottom-scan yes/no,
     #    whole-string consumers, json whose loss silently drops data) or no
     #    calib_008 data (norm_evaluate family idle while the seed pipeline
@@ -226,10 +235,14 @@ def _log_call(model, call_type, prompt, response, schema_enforced, error=None):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries: int = 2) -> str:
+def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries: int = 2,
+             prompt_fn: str = None) -> str:
     """
     Route a prompt to the correct Ollama model using three-tier routing.
     If json_schema is provided, it is passed as format= to enforce structured output.
+    prompt_fn overrides the stack-walk attribution — direct llm_call callers
+    (SpecificNormUtility, defection_engine, creation) have no run_gpt_* frame
+    and otherwise profile as "unknown" with default caps/routing.
     Returns the response content as a string.
 
     Routing precedence (when CRSEC_TIERED_ROUTING != "0"):
@@ -242,7 +255,8 @@ def llm_call(prompt: str, call_type: str, json_schema: dict = None, max_retries:
       5. else                                                            → PRIMARY_MODEL
     When CRSEC_TIERED_ROUTING=0: everything → REASONING_MODEL (A/B baseline).
     """
-    prompt_fn = _caller_prompt_fn()
+    if prompt_fn is None:
+        prompt_fn = _caller_prompt_fn()
 
     tiered = os.environ.get("CRSEC_TIERED_ROUTING", "1") != "0"
     norm_on_primary = os.environ.get("CRSEC_NORM_ON_PRIMARY", "1") != "0"

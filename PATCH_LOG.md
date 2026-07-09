@@ -925,3 +925,52 @@ call_type="norm_evaluation" responses from calib_010/calls.jsonl. Evidence-
 based rule: no parser gets rewritten against guessed output shapes. Deferred
 until the bundle is synced; pass-3's eval_deferred_utility guard means the
 current failure mode is a benign defer-and-retry, not corruption.
+
+---
+
+## 2026-07-09 — Pass 4.5: SpecificNormUtility attribution + tolerant parser + routing/cap
+
+Branch `norm_deflection`, on top of `ec617a9` (cluster base-seeding commit,
+pulled as a clean fast-forward). Evidence: calib_011 bundle; its calls.jsonl
+holds 341 call_type="norm_evaluation" responses (254 from calib_011 + the 87
+calib_010 carryover in the appended log), all on qwen3:32b.
+
+Diagnosis: the utility template's examples show "- OUTPUT: <score>. Because
+<reason>." and Qwen3 answers in markdown — "- **OUTPUT**: **30**. Because
+..." (sometimes "- **Because**:" on its own line). The literal
+`split("OUTPUT: ")` + `int()` parse failed on 328/341 captured calls (13
+parsed = the plain-format minority), every failure deferring the seed →
+adoption ran at ~3% of its rate and the 254 calls (8.5s avg, 2,148s total)
+profiled as prompt_fn "unknown".
+
+1. Attribution — `llm_call(..., prompt_fn=None)`: explicit override of the
+   stack-walk for direct callers with no run_gpt_* frame. Labeled:
+   SpecificNormUtility → "run_gpt_specific_norm_utility"; defection_engine
+   → "run_gpt_defection_assessment" / "run_gpt_defector_norm_utility";
+   creation.Creation → "run_gpt_norm_creation". Profiler + num_predict +
+   routing now see real names.
+2. Parser — module-level `_parse_norm_utility_response`: last OUTPUT marker
+   (bold-tolerant) → first int in the segment → reason with markdown/bullet/
+   "Because:" peeling (keeps the leading "Because", as the old parser did);
+   fallback when no marker: a "<int>. <text>" score-LINE scan (deliberately
+   never a bare first-int grab — the INPUT echo line contains times).
+   Refusals ("**N/A**. Because...") raise → the pass-3 defer path handles
+   them. json_schema was considered and rejected: it changes the RESPONSE
+   distribution, which cannot be validated against captured data offline.
+   Replay: 340/341 = 99.7% (the 1 residual is that genuine N/A refusal);
+   calib_008/009 regression unchanged; the accumulated calib_011 log also
+   re-validated every earlier parser in the wild (type_check_v2 928/935 —
+   the 7 misses match the run's own 7 retries — all others 100%).
+3. Routing + cap — "run_gpt_specific_norm_utility" joins
+   NORM_PRIMARY_OVERRIDE_FNS (norm-reasoning tier consistency with
+   decide_if_norm_conflict / norm_reflect_from_thoughts, both validated on
+   the 30b in calib_011); CRSEC_NORM_ON_PRIMARY=0 restores the 32b exactly
+   via the tier-3 call_type fallback. Cap 2712 (= 2 × p99 of 1,356 tok;
+   measured p50 894 / p95 4,011 / p99 4,745 / max 4,927 chars): the score
+   leads the response (top-reader), and the old "unknown" default of 1024
+   truncated 4 responses. get_defector_norm_utility: attribution only —
+   zero captured samples, parser and 32b routing untouched.
+
+Tests: +3 (markdown-shape parser unit test incl. refusal raise; prompt_fn
+override routes to PRIMARY with cap 2712; flag=0 restores 32b). Suite: 143
+passed, 1 deselected (pre-existing 462a1a6 failure).

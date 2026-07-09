@@ -462,6 +462,36 @@ class TestTieredRouting(EnvMixin, unittest.TestCase):
                              llm_router.REASONING_MODEL,
                              f"{fn} should route to REASONING_MODEL with flag=0")
 
+    def _call_with_prompt_fn(self, prompt_fn, call_type):
+        captured = {}
+
+        def fake_chat(**kwargs):
+            captured.update(kwargs)
+            return {"message": {"content": "ok"}}
+
+        with patch.object(llm_router.ollama, "chat", fake_chat), \
+                patch.object(llm_router, "_log_call", lambda *a, **k: None):
+            llm_router.llm_call("p", call_type, prompt_fn=prompt_fn)
+        return captured
+
+    def test_prompt_fn_override_routes_and_caps_utility_scorer(self):
+        """The explicit prompt_fn= override replaces the stack walk: the
+        utility scorer follows CRSEC_NORM_ON_PRIMARY (default on) and gets
+        its data-derived cap instead of the unknown-fn default."""
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        kwargs = self._call_with_prompt_fn("run_gpt_specific_norm_utility",
+                                           "norm_evaluation")
+        self.assertEqual(kwargs["model"], llm_router.PRIMARY_MODEL)
+        self.assertEqual(kwargs["options"]["num_predict"], 2712)
+
+    def test_prompt_fn_override_flag_off_restores_32b(self):
+        self.setenv("CRSEC_TIERED_ROUTING", "1")
+        self.setenv("CRSEC_NORM_ON_PRIMARY", "0")
+        kwargs = self._call_with_prompt_fn("run_gpt_specific_norm_utility",
+                                           "norm_evaluation")
+        # tier-3 call_type fallback: exactly the old routing
+        self.assertEqual(kwargs["model"], llm_router.REASONING_MODEL)
+
     def test_event_triple_routes_to_primary(self):
         """run_gpt_prompt_event_triple was moved from SMALL to PRIMARY."""
         self.setenv("CRSEC_TIERED_ROUTING", "1")
@@ -609,6 +639,21 @@ class TestSpecificNormUtilityPort(unittest.TestCase):
             res = snu.specific_norm_utility("No smoking in the cafe.")
         self.assertIsInstance(res, list)
         self.assertEqual(len(res), 2)
+
+    def test_utility_parser_tolerates_markdown(self):
+        """Pass 4.5: the dominant calib_010/011 shape — bold marker + bold
+        score + bullet — must parse; a refusal must raise (defer)."""
+        parse = run_gpt_prompt_norm._parse_norm_utility_response
+        self.assertEqual(
+            parse("- **INPUT**: Loud tipping talk.\n"
+                  "- **OUTPUT**: **30**. Because it disrupts the cafe."),
+            [30, "Because it disrupts the cafe."])
+        self.assertEqual(
+            parse("- OUTPUT: **75**.  \n- **Because**: volume norms matter."),
+            [75, "Because volume norms matter."])
+        self.assertEqual(parse("OUTPUT: 7. because X"), [7, "because X"])
+        with self.assertRaises(ValueError):
+            parse("**N/A**. Because this reflects personal relationships.")
 
     def test_consumer_does_not_raise_on_failsafe(self):
         """generate_normal_norm_utility (the norm_evaluate consumer feeding the

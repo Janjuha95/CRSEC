@@ -62,7 +62,8 @@ class Creation:
         self.msg.append(agent_prompt)
 
         composed = "\n\n".join(m["content"] for m in self.msg)
-        return llm_call(composed, call_type="norm_creation")
+        return llm_call(composed, call_type="norm_creation",
+                        prompt_fn="run_gpt_norm_creation")
 
 
 def Create(rs):
