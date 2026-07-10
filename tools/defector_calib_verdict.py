@@ -48,7 +48,11 @@ def main():
     gate("real reasoning (not parse-failure fallback)",
          len(dlog) > 0 and reasoned / max(len(dlog), 1) > 0.8,
          f"{reasoned}/{len(dlog)} with real reasoning")
-    defector_names = sorted({d.get("agent_name") for d in dlog})
+    # MetricsCollector.log_defection_attempt stores the name under "agent"
+    # (the log_* kwargs are agent_name, but the event dict key is "agent" —
+    # same key-name lesson as the violation "norm" field above).
+    defector_names = sorted({d.get("agent") or d.get("agent_name")
+                             for d in dlog if d.get("agent") or d.get("agent_name")})
     print(f"       defectors deciding: {defector_names}")
 
     # ---- violations & enforcement ----
