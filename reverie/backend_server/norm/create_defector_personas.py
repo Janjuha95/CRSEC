@@ -1,12 +1,26 @@
 """
 File: create_defector_personas.py
-Description: Scaffolds 3 strategic defector agent personas into an existing
-base simulation directory (Modification 1, Strategic Defector Agent Design).
+Description: Strategic defector agent tooling (Modification 1, Strategic
+Defector Agent Design). Two modes:
+
+ADD mode (legacy, default): scaffolds the 3 named defector personas
+(Marcus/Elena/Derek) into a base sim dir as NEW agents. Changes population
+size — do not use for Exp1 conditions.
+
+FLIP mode (--flip): converts EXISTING citizens into strategic defectors
+in place, holding n constant. This is the Exp1 condition-base builder
+(design session Jul 10, 2026): only scratch.json changes — identity/
+agent_type -> "defector", uniform defector parameters, and one sentence
+appended to `learned` (hybrid flip). Norm databases, meta.json,
+schedules, and spatial info are untouched, so a flipped base differs
+from the seeded baseline ONLY in defector status.
 
 Usage:
+  # Exp1 condition base (n stays 10):
+  python create_defector_personas.py <base_sim_dir> --flip "Carlos Gomez" "Wolfgang Schulz"
+
+  # legacy add mode:
   python create_defector_personas.py <base_sim_dir>
-  e.g.,
-  python create_defector_personas.py ../../environment/frontend_server/storage/base_ville_n10_with_norm
 """
 import argparse
 import json
@@ -113,6 +127,74 @@ DEFECTOR_CONFIGS = [
 ]
 
 
+# Uniform defector parameters for FLIP mode (design session Jul 10, 2026;
+# proposal §3.2 scales 1-10). Uniform across all flipped agents so defector
+# PROPORTION is the only manipulated variable across Exp1 conditions.
+FLIP_DEFAULTS = {
+    "boldness": 8,
+    "vengefulness": 2,
+    "risk_tolerance": 7,
+    "reputation_concern": 3,
+}
+
+# Appended to `learned` on flip (pronoun-free so it works for any persona).
+FLIP_LEARNED_SENTENCE = (
+    " {first_name} privately treats social rules as optional and quietly "
+    "ignores the ones that are inconvenient."
+)
+
+
+def flip_persona(base_sim_dir, name, params, dry_run=False):
+    """Convert an existing citizen persona into a strategic defector in place.
+
+    Only scratch.json is modified. Refuses entrepreneurs and minors.
+    Idempotent: re-running on an already-flipped persona only re-applies
+    parameter values (the learned sentence is not appended twice).
+    """
+    persona_dir = os.path.join(base_sim_dir, "personas", name)
+    scratch_path = os.path.join(persona_dir, "bootstrap_memory", "scratch.json")
+    if not os.path.isfile(scratch_path):
+        print(f"[ERROR] no such persona to flip: {name} ({scratch_path})")
+        return False
+
+    with open(scratch_path, "r") as f:
+        scratch = json.load(f)
+
+    if scratch.get("identity") == "entrepreneur":
+        print(f"[REFUSED] {name} is an entrepreneur — never flipped.")
+        return False
+    if isinstance(scratch.get("age"), int) and scratch["age"] < 18:
+        print(f"[REFUSED] {name} is a minor (age {scratch['age']}) — not flipped.")
+        return False
+
+    scratch["identity"] = "defector"
+    scratch["agent_type"] = "defector"
+    for key, value in params.items():
+        scratch[key] = value
+    scratch["trust_score"] = 100
+    scratch.setdefault("reputation_beliefs", {})
+    scratch.setdefault("violation_history", [])
+    scratch.setdefault("observed_violations", [])
+
+    sentence = FLIP_LEARNED_SENTENCE.format(
+        first_name=scratch.get("first_name", name.split()[0]))
+    if sentence.strip() not in scratch.get("learned", ""):
+        scratch["learned"] = scratch.get("learned", "").rstrip() + sentence
+
+    if dry_run:
+        print(f"[dry-run] would flip {name}: params={params}, "
+              f"learned+='{sentence.strip()[:60]}...'")
+        return True
+
+    with open(scratch_path, "w") as f:
+        json.dump(scratch, f, indent=2)
+    print(f"[flipped] {name}: identity/agent_type=defector, "
+          f"boldness={scratch['boldness']}, vengefulness={scratch['vengefulness']}, "
+          f"risk_tolerance={scratch['risk_tolerance']}, "
+          f"reputation_concern={scratch['reputation_concern']}")
+    return True
+
+
 def build_scratch_json(template_scratch, cfg):
     """Take a loaded citizen scratch.json dict and overlay defector fields."""
     scratch = dict(template_scratch)
@@ -201,17 +283,52 @@ def main():
     parser.add_argument(
         "--template",
         default="Carlos Gomez",
-        help="Name of existing citizen persona to use as a template (default: 'Carlos Gomez').",
+        help="ADD mode: existing citizen persona to use as a template (default: 'Carlos Gomez').",
     )
+    parser.add_argument(
+        "--flip",
+        nargs="+",
+        metavar="NAME",
+        help="FLIP mode: convert these existing citizens into defectors in "
+             "place (n unchanged). Entrepreneurs and minors are refused.",
+    )
+    parser.add_argument("--boldness", type=int, default=FLIP_DEFAULTS["boldness"])
+    parser.add_argument("--vengefulness", type=int, default=FLIP_DEFAULTS["vengefulness"])
+    parser.add_argument("--risk-tolerance", type=int, default=FLIP_DEFAULTS["risk_tolerance"])
+    parser.add_argument("--reputation-concern", type=int, default=FLIP_DEFAULTS["reputation_concern"])
+    parser.add_argument("--dry-run", action="store_true",
+                        help="FLIP mode: report what would change without writing.")
     args = parser.parse_args()
 
     base_sim_dir = os.path.abspath(args.base_sim_dir)
     personas_root = os.path.join(base_sim_dir, "personas")
-    template_persona_dir = os.path.join(personas_root, args.template)
 
     if not os.path.isdir(personas_root):
         print(f"ERROR: personas directory not found: {personas_root}")
         sys.exit(1)
+
+    if args.flip:
+        params = {
+            "boldness": args.boldness,
+            "vengefulness": args.vengefulness,
+            "risk_tolerance": args.risk_tolerance,
+            "reputation_concern": args.reputation_concern,
+        }
+        flipped, failed = [], []
+        for name in args.flip:
+            (flipped if flip_persona(base_sim_dir, name, params,
+                                     dry_run=args.dry_run) else failed).append(name)
+        print("")
+        print("Summary (FLIP mode):")
+        print(f"  base sim dir: {base_sim_dir}")
+        print(f"  params: {params}")
+        print(f"  flipped: {flipped}")
+        if failed:
+            print(f"  FAILED/refused: {failed}")
+            sys.exit(1)
+        return
+
+    template_persona_dir = os.path.join(personas_root, args.template)
     if not os.path.isdir(template_persona_dir):
         print(f"ERROR: template persona directory not found: {template_persona_dir}")
         sys.exit(1)
@@ -224,7 +341,7 @@ def main():
     update_meta_json(base_sim_dir, [cfg["name"] for cfg in DEFECTOR_CONFIGS])
 
     print("")
-    print("Summary:")
+    print("Summary (ADD mode):")
     print(f"  base sim dir: {base_sim_dir}")
     print(f"  template: {args.template}")
     print(f"  defectors created this run: {created}")
