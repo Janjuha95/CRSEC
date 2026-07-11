@@ -3030,6 +3030,14 @@ def run_gpt_prompt_summarize_ideas(persona, statements, question, test_input=Non
         for norm_id, a_norm in persona.norm_database.act_norm.items():
             if a_norm.activation_state == False:
                 continue
+            if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+                from norm.defection_engine import decide_defection_cached
+                decision, _ = decide_defection_cached(
+                    persona, a_norm,
+                    {"description": "summarizing ideas to answer a question"},
+                    metrics=getattr(persona, 'metrics', None))
+                if decision == "defect":
+                    continue  # defied norm: excluded from this persona's framing
             curr_act_norms += f"- [{str(a_norm.poignancy)}] "
             curr_act_norms += a_norm.content
             curr_act_norms += "\n"
@@ -3111,6 +3119,14 @@ def run_gpt_prompt_generate_next_convo_line(persona, interlocutor_desc, prev_con
         for norm_id, a_norm in persona.norm_database.act_norm.items():
             if a_norm.activation_state == False:
                 continue
+            if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+                from norm.defection_engine import decide_defection_cached
+                decision, _ = decide_defection_cached(
+                    persona, a_norm,
+                    {"description": "speaking the next line in a conversation"},
+                    metrics=getattr(persona, 'metrics', None))
+                if decision == "defect":
+                    continue  # defied norm: excluded from this persona's framing
             curr_act_norms += f"- [{str(a_norm.poignancy)}] "
             curr_act_norms += a_norm.content
             curr_act_norms += "\n"

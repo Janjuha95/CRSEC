@@ -16,6 +16,42 @@ from persona.prompt_template.gpt_structure import generate_prompt
 DEFECTION_PROMPT = "norm/defection_prompt/defection_assessment_v1.txt"
 DEFECTOR_NORM_UTILITY_PROMPT = "norm/defection_prompt/specific_norm_utility_defector_v1.txt"
 
+# (persona_name, norm_content, sim_date) -> (decision, reasoning).
+# Growth is bounded: defectors x active norms x sim days (~50/day in cond C).
+_DECISION_CACHE = {}
+
+
+def decide_defection_cached(persona, norm, context_dict, metrics=None):
+    """One defection decision per defector, norm, and sim-day.
+
+    Every behavior-shaping act-norm injection site (daily plan, hourly
+    schedule, task decomposition, interview/convo prompt building) consults
+    this instead of calculate_defection_utility directly, so a defector makes
+    ONE LLM-backed decision per (norm, sim-day) no matter how many prompts
+    are built that day. Cache hits return the stored (decision, reasoning)
+    with no LLM call and no duplicate metrics logging. Non-defectors
+    short-circuit without touching the cache.
+    """
+    scratch = persona.scratch
+    # Same source of truth as the gate sites (scratch.is_defector());
+    # agent_type fallback matches calculate_defection_utility's own check.
+    if hasattr(scratch, "is_defector"):
+        is_def = scratch.is_defector()
+    else:
+        is_def = getattr(scratch, "agent_type", "citizen") == "defector"
+    if not is_def:
+        return "comply", "Not a defector"
+    curr_time = getattr(persona.scratch, "curr_time", None)
+    if curr_time is None:
+        # no sim clock yet (bootstrap): fall back to an uncached decision
+        return calculate_defection_utility(persona, norm, context_dict,
+                                           metrics=metrics)
+    key = (persona.scratch.name, norm.content, curr_time.date())
+    if key not in _DECISION_CACHE:
+        _DECISION_CACHE[key] = calculate_defection_utility(
+            persona, norm, context_dict, metrics=metrics)
+    return _DECISION_CACHE[key]
+
 
 def _parse_decision(response):
     """Pull Decision / Reasoning out of the LLM response. Defaults to comply

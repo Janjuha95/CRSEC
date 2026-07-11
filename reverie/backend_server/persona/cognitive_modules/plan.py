@@ -72,6 +72,13 @@ def generate_first_daily_plan(persona, wake_up_hour):
   for norm_id, a_norm in persona.norm_database.act_norm.items():
     if a_norm.activation_state == False:
       continue
+    if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+      from norm.defection_engine import decide_defection_cached
+      decision, _ = decide_defection_cached(
+          persona, a_norm, {"description": "planning the first day's schedule"},
+          metrics=getattr(persona, 'metrics', None))
+      if decision == "defect":
+        continue  # defied norm: excluded from this persona's planning
     curr_act_norms += f"- [{str(a_norm.poignancy)}] "
     curr_act_norms += a_norm.content
     curr_act_norms += "\n"
@@ -122,6 +129,13 @@ def generate_hourly_schedule(persona, wake_up_hour):
           for norm_id, a_norm in persona.norm_database.act_norm.items():
             if a_norm.activation_state == False:
               continue
+            if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+              from norm.defection_engine import decide_defection_cached
+              decision, _ = decide_defection_cached(
+                  persona, a_norm, {"description": "creating today's hourly schedule"},
+                  metrics=getattr(persona, 'metrics', None))
+              if decision == "defect":
+                continue  # defied norm: excluded from this persona's planning
             curr_act_norms += f"- [{str(a_norm.poignancy)}] "
             curr_act_norms += a_norm.content
             curr_act_norms += "\n"
@@ -187,6 +201,13 @@ def generate_task_decomp(persona, task, duration):
   for norm_id, a_norm in persona.norm_database.act_norm.items():
     if a_norm.activation_state == False:
       continue
+    if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+      from norm.defection_engine import decide_defection_cached
+      decision, _ = decide_defection_cached(
+          persona, a_norm, {"description": "decomposing the current task into steps"},
+          metrics=getattr(persona, 'metrics', None))
+      if decision == "defect":
+        continue  # defied norm: excluded from this persona's planning
     curr_act_norms += f"- [{str(a_norm.poignancy)}] "
     curr_act_norms += a_norm.content
     curr_act_norms += "\n"
@@ -219,6 +240,13 @@ def generate_task_decomp_v2(persona, task, duration):
   for norm_id, a_norm in persona.norm_database.act_norm.items():
     if a_norm.activation_state == False:
       continue
+    if hasattr(persona, 'scratch') and persona.scratch.is_defector():
+      from norm.defection_engine import decide_defection_cached
+      decision, _ = decide_defection_cached(
+          persona, a_norm, {"description": "decomposing the current task into steps"},
+          metrics=getattr(persona, 'metrics', None))
+      if decision == "defect":
+        continue  # defied norm: excluded from this persona's planning
     curr_act_norms += f"- [{str(a_norm.poignancy)}] "
     curr_act_norms += a_norm.content
     curr_act_norms += "\n"

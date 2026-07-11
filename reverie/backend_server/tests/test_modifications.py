@@ -1006,6 +1006,87 @@ class TestNormLoadMismatch(unittest.TestCase):
                     normDatabase.NormDatabase(d, 5, 5, None)
 
 
+class TestDefectionDecisionCache(unittest.TestCase):
+    """decide_defection_cached: one LLM-backed decision per (defector, norm,
+    sim-day); repeats hit the cache with no second call and no duplicate
+    metrics logging; non-defectors never touch the cache."""
+
+    def _persona(self, agent_type="defector", curr_time=...):
+        import datetime as dt
+        p = _NS()
+        p.scratch = _NS()
+        p.scratch.name = "Carlos Gomez"
+        p.scratch.agent_type = agent_type
+        p.scratch.curr_time = (dt.datetime(2023, 2, 13, 9, 0)
+                               if curr_time is ... else curr_time)
+        return p
+
+    def _norm(self, content="No smoking indoors."):
+        n = _NS()
+        n.content = content
+        return n
+
+    def test_second_call_same_day_is_cached(self):
+        import datetime as dt
+
+        from norm import defection_engine
+
+        calls = []
+
+        def fake_calc(persona, norm, ctx, metrics=None):
+            calls.append(norm.content)
+            return ("defect", "payoff outweighs the risk")
+
+        persona, norm = self._persona(), self._norm()
+        with patch.object(defection_engine, "calculate_defection_utility",
+                          fake_calc):
+            defection_engine._DECISION_CACHE.clear()
+            r1 = defection_engine.decide_defection_cached(persona, norm, {})
+            r2 = defection_engine.decide_defection_cached(persona, norm, {})
+            self.assertEqual(r1, r2)
+            self.assertEqual(len(calls), 1)  # cache hit: no second LLM call
+            # next sim-day: fresh decision
+            persona.scratch.curr_time += dt.timedelta(days=1)
+            defection_engine.decide_defection_cached(persona, norm, {})
+            self.assertEqual(len(calls), 2)
+            # different norm same day: fresh decision
+            defection_engine.decide_defection_cached(
+                persona, self._norm("Tip the staff."), {})
+            self.assertEqual(len(calls), 3)
+        defection_engine._DECISION_CACHE.clear()
+
+    def test_non_defector_short_circuits_without_cache(self):
+        from norm import defection_engine
+
+        def boom(*a, **k):
+            raise AssertionError("must not be called for non-defectors")
+
+        persona = self._persona(agent_type="citizen")
+        with patch.object(defection_engine, "calculate_defection_utility", boom):
+            defection_engine._DECISION_CACHE.clear()
+            r = defection_engine.decide_defection_cached(persona, self._norm(), {})
+        self.assertEqual(r, ("comply", "Not a defector"))
+        self.assertEqual(defection_engine._DECISION_CACHE, {})
+
+    def test_no_sim_clock_falls_back_uncached(self):
+        from norm import defection_engine
+
+        calls = []
+
+        def fake_calc(persona, norm, ctx, metrics=None):
+            calls.append(1)
+            return ("comply", "observers nearby")
+
+        persona = self._persona(curr_time=None)
+        with patch.object(defection_engine, "calculate_defection_utility",
+                          fake_calc):
+            defection_engine._DECISION_CACHE.clear()
+            defection_engine.decide_defection_cached(persona, self._norm(), {})
+            defection_engine.decide_defection_cached(persona, self._norm(), {})
+        self.assertEqual(len(calls), 2)  # uncached: decided each time
+        self.assertEqual(defection_engine._DECISION_CACHE, {})
+
+
 class TestViolationContentLivePath(unittest.TestCase):
     """Pass 4 Change D: norm content must flow from a REAL NormNode through
     detect_violations -> process_violations into the metrics logs and the

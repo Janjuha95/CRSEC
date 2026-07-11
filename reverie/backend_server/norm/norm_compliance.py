@@ -23,8 +23,8 @@ def generate_revise_identity_currently(persona, plan_note, thought_note):
         if a_norm.activation_state == False:
             continue
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
-            from norm.defection_engine import calculate_defection_utility
-            decision, reasoning = calculate_defection_utility(
+            from norm.defection_engine import decide_defection_cached
+            decision, reasoning = decide_defection_cached(
                 persona, a_norm, {"description": "daily planning"},
                 metrics=getattr(persona, 'metrics', None))
             if decision == "defect":
@@ -44,8 +44,8 @@ def generate_revise_identity_daily_plan_req(persona):
         if a_norm.activation_state == False:
             continue
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
-            from norm.defection_engine import calculate_defection_utility
-            decision, reasoning = calculate_defection_utility(
+            from norm.defection_engine import decide_defection_cached
+            decision, reasoning = decide_defection_cached(
                 persona, a_norm, {"description": "daily planning"},
                 metrics=getattr(persona, 'metrics', None))
             if decision == "defect":
@@ -100,8 +100,8 @@ def generate_new_daily_plan(persona, wake_up_hour):
         if a_norm.activation_state == False:
             continue
         if hasattr(persona, 'scratch') and persona.scratch.is_defector():
-            from norm.defection_engine import calculate_defection_utility
-            decision, reasoning = calculate_defection_utility(
+            from norm.defection_engine import decide_defection_cached
+            decision, reasoning = decide_defection_cached(
                 persona, a_norm, {"description": "daily planning"},
                 metrics=getattr(persona, 'metrics', None))
             if decision == "defect":

@@ -974,3 +974,45 @@ profiled as prompt_fn "unknown".
 Tests: +3 (markdown-shape parser unit test incl. refusal raise; prompt_fn
 override routes to PRIMARY with cap 2712; flag=0 restores 32b). Suite: 143
 passed, 1 deselected (pre-existing 462a1a6 failure).
+
+---
+
+## 2026-07-11 — day-1 defection gating + seeded defector norms (branch mindwell_defectors)
+
+calib_013_defector came back all-green EXCEPT defection_log = 0: the engine
+was only reachable through the "New day" planning branch (second sim
+morning), none of the behavior-shaping act-norm injections were gated, and
+defectors started with zero norms anyway.
+
+1. `decide_defection_cached` (norm/defection_engine.py): one LLM-backed
+   decision per (defector, norm, sim-day), keyed on scratch.name /
+   norm.content / curr_time.date(); cache hits skip the LLM and duplicate
+   metrics logging; non-defectors short-circuit without touching the cache;
+   curr_time=None falls back uncached. Defector-ness via scratch.is_defector()
+   (agent_type fallback) — same source of truth as the gate sites.
+2. Gated ALL behavior-shaping act-norm injection sites with the
+   norm_compliance pattern (defect → norm excluded from that persona's
+   prompt): plan.py generate_first_daily_plan / generate_hourly_schedule /
+   generate_task_decomp / generate_task_decomp_v2; run_gpt_prompt.py
+   run_gpt_prompt_summarize_ideas + run_gpt_prompt_generate_next_convo_line
+   (both independently read act_norm to build prompts — gated identically).
+   Retrofitted the 3 existing norm_compliance.py sites to the cached helper.
+   Evaluation/observation paths (norm_evaluate, violation_detection, metrics)
+   left ungated by design: defectors still know/evaluate/spread/observe.
+3. `--seed-norms-from` in create_defector_personas.py FLIP mode + wired into
+   tools/build_exp1_condition_bases.sh: flipped defectors get the union of
+   Isabella's + Tom's norms (argument order, re-keyed norm_1..norm_10 with
+   ID 1..10, all other fields verbatim, both norm files, scratch counts set
+   to 10 → CRSEC_STRICT_NORM_LOAD passes, verified by live strict load).
+   Build verification extended: defectors 10/10 files+scratch, entrepreneurs
+   5/5, citizens 0/0, n=10 — all three bases rebuilt and asserted.
+
+Verified: baseline base_ville_n10_with_norm byte-identical; flipped-persona
+scratch diff is exactly 13 keys (the 11 from the flip + norm_count +
+act_norm_count); merged files: Isabella 1-5 then Tom 6-10 verbatim, all
+active+valid; every gate sits inside is_defector() (grep-confirmed) so
+citizen/entrepreneur behavior in baseline runs is bit-identical; 3 new cache
+unit tests (same-day hit, day rollover, per-norm keying, non-defector
+no-cache, no-clock uncached). Suite: 146 passed, 1 deselected; replay green
+vs calib_008/009/011. Expected day-1 cost in cond C: 5 defectors x 10 norms
+= ~50 cached decisions.

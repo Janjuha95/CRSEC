@@ -195,6 +195,69 @@ def flip_persona(base_sim_dir, name, params, dry_run=False):
     return True
 
 
+NORM_FILES = ("personal_norm_database.json",
+              "personal_norm_database_validity.json")
+
+
+def _merge_norm_file(base_sim_dir, source_names, filename):
+    """Union of the sources' norm files (argument order), re-keyed
+    sequentially as norm_1..norm_N with node ID = 1..N. Source files each use
+    norm_1..norm_5, so re-keying is mandatory. All other node fields are kept
+    verbatim."""
+    merged = {}
+    idx = 0
+    for src in source_names:
+        path = os.path.join(base_sim_dir, "personas", src, "norms", filename)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"seed source {src!r} has no {filename}: {path}")
+        with open(path, "r", encoding="utf-8") as f:
+            db = json.load(f)
+        for key in sorted(db, key=lambda k: int(k.split("_")[1])):
+            idx += 1
+            node = dict(db[key])
+            node["ID"] = idx
+            merged[f"norm_{idx}"] = node
+    return merged
+
+
+def seed_norms_from(base_sim_dir, target_name, source_names, dry_run=False):
+    """Seed a flipped defector with the union of the sources' personal norms
+    as ACTIVE norms (design session Jul 11, 2026: defectors know the norms —
+    they defy them behaviorally; with zero norms the defection engine never
+    fires on day 1). Writes both norm files and sets the target's scratch
+    norm_count/act_norm_count to N so the strict loader guard passes.
+    Idempotent: re-running overwrites the seeded files cleanly."""
+    merged = {f: _merge_norm_file(base_sim_dir, source_names, f)
+              for f in NORM_FILES}
+    counts = {f: len(m) for f, m in merged.items()}
+    if len(set(counts.values())) != 1:
+        raise ValueError(f"seed sources disagree on norm counts: {counts}")
+    n = counts[NORM_FILES[0]]
+
+    if dry_run:
+        print(f"[dry-run] would seed {target_name} with {n} norms "
+              f"from {source_names} and set scratch counts to {n}")
+        return n
+
+    norms_dir = os.path.join(base_sim_dir, "personas", target_name, "norms")
+    os.makedirs(norms_dir, exist_ok=True)
+    for fname in NORM_FILES:
+        with open(os.path.join(norms_dir, fname), "w", encoding="utf-8") as f:
+            json.dump(merged[fname], f, ensure_ascii=False, indent=2)
+
+    scratch_path = os.path.join(base_sim_dir, "personas", target_name,
+                                "bootstrap_memory", "scratch.json")
+    with open(scratch_path, "r", encoding="utf-8") as f:
+        scratch = json.load(f)
+    scratch["norm_count"] = n
+    scratch["act_norm_count"] = n
+    with open(scratch_path, "w", encoding="utf-8") as f:
+        json.dump(scratch, f, indent=2)
+    print(f"[seeded] {target_name}: {n} norms from {', '.join(source_names)} "
+          f"(scratch counts -> {n})")
+    return n
+
+
 def build_scratch_json(template_scratch, cfg):
     """Take a loaded citizen scratch.json dict and overlay defector fields."""
     scratch = dict(template_scratch)
@@ -292,6 +355,14 @@ def main():
         help="FLIP mode: convert these existing citizens into defectors in "
              "place (n unchanged). Entrepreneurs and minors are refused.",
     )
+    parser.add_argument(
+        "--seed-norms-from",
+        nargs="+",
+        metavar="NAME",
+        help="FLIP mode: seed each flipped defector with the union of these "
+             "personas' norm files (re-keyed norm_1..norm_N, scratch counts "
+             "updated).",
+    )
     parser.add_argument("--boldness", type=int, default=FLIP_DEFAULTS["boldness"])
     parser.add_argument("--vengefulness", type=int, default=FLIP_DEFAULTS["vengefulness"])
     parser.add_argument("--risk-tolerance", type=int, default=FLIP_DEFAULTS["risk_tolerance"])
@@ -318,11 +389,24 @@ def main():
         for name in args.flip:
             (flipped if flip_persona(base_sim_dir, name, params,
                                      dry_run=args.dry_run) else failed).append(name)
+        seeded_n = None
+        if args.seed_norms_from:
+            for name in flipped:
+                try:
+                    seeded_n = seed_norms_from(base_sim_dir, name,
+                                               args.seed_norms_from,
+                                               dry_run=args.dry_run)
+                except (FileNotFoundError, ValueError) as e:
+                    print(f"[ERROR] seeding {name}: {e}")
+                    failed.append(name)
         print("")
         print("Summary (FLIP mode):")
         print(f"  base sim dir: {base_sim_dir}")
         print(f"  params: {params}")
         print(f"  flipped: {flipped}")
+        if args.seed_norms_from:
+            print(f"  seeded norms: {seeded_n} per defector "
+                  f"(from {args.seed_norms_from})")
         if failed:
             print(f"  FAILED/refused: {failed}")
             sys.exit(1)
