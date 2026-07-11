@@ -5,6 +5,7 @@ File: gpt_structure.py
 Description: Wrapper functions for calling OpenAI APIs.
 """
 import json
+import os
 import random
 import sys
 import time
@@ -412,12 +413,31 @@ def safe_generate_response(prompt,
 
 
 def get_embedding(text, model="nomic-embed-text"):
+  """All 9 embedding call sites funnel through here. Unguarded, a bloated
+  thought (e.g. day-2 plan join) exceeds the embed model's context window and
+  ollama raises ResponseError 'context length' — which killed exp1_base_r1_c2
+  at its first sim-midnight. Clip up front, and on a context-length error
+  halve and retry (max 3) before re-raising: visible failure > silent junk."""
   import ollama
   text = text.replace("\n", " ")
   temp_sleep()
   if not text:
     text = "this is blank"
-  return ollama.embeddings(model=model, prompt=text)["embedding"]
+  max_chars = int(os.environ.get("CRSEC_EMBED_MAX_CHARS", "8000"))
+  if len(text) > max_chars:
+    print(f"[EMBED CLIP] {len(text)} -> {max_chars} chars")
+    text = text[:max_chars]
+  for halving in range(4):  # initial attempt + up to 3 halvings
+    try:
+      return ollama.embeddings(model=model, prompt=text)["embedding"]
+    except Exception as e:
+      if "context length" in str(e).lower() and halving < 3:
+        new_len = max(1, len(text) // 2)
+        print(f"[EMBED CLIP] context-length error, halving "
+              f"{len(text)} -> {new_len} chars (retry {halving + 1}/3)")
+        text = text[:new_len]
+        continue
+      raise
 
 
 if __name__ == '__main__':

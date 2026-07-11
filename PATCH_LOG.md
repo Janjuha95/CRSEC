@@ -1016,3 +1016,43 @@ unit tests (same-day hit, day rollover, per-norm keying, non-defector
 no-cache, no-clock uncached). Suite: 146 passed, 1 deselected; replay green
 vs calib_008/009/011. Expected day-1 cost in cond C: 5 defectors x 10 norms
 = ~50 cached decisions.
+
+---
+
+## 2026-07-12 — overnight hardening: embedding guard + text-bloat caps (branch mindwell_defectors)
+
+exp1_base_r1_c2 crashed at its first sim-midnight: _long_term_planning
+joined all daily_req items into a plan-thought, get_embedding(thought)
+exceeded the embed model's context window, ollama raised ResponseError
+"context length" unhandled → run aborted. Three guards, all no-ops for
+well-sized text (identical inputs → identical outputs under the caps):
+
+1. get_embedding (gpt_structure.py, the single funnel for all 9 embedding
+   call sites): clips input to CRSEC_EMBED_MAX_CHARS (default 8000) with a
+   loud "[EMBED CLIP] <orig> -> <new> chars" line; on a context-length error
+   halves and retries (max 3, loud each time) then re-raises — visible
+   failure over silent junk. Newline-strip / temp_sleep / "this is blank"
+   behavior unchanged.
+2. daily_plan_v2 cleanup (run_gpt_prompt_norm.py): _cap_plan_items on BOTH
+   parse paths — at most 20 items, each ≤200 chars, "[PLAN CAP]" on trigger.
+   The line-fallback could turn every line of a rambling response into a
+   plan item; the joined items are embedded and injected into all 24
+   hourly-schedule prompts. Worst case now ≤4000 chars, under the embed cap.
+3. revise-identity cleanups: _cap_identity_text (1000 chars, cut at the last
+   sentence boundary past the halfway point, "[IDENTITY CAP]" on trigger) on
+   run_gpt_revise_identity_currently and _daily_plan_req — their tails become
+   scratch.currently / scratch.daily_plan_req and inflate every subsequent
+   prompt via the identity stable set. Parsing logic untouched.
+
+Verification: all embedding calls funnel through get_embedding (perceive ×2,
+converse ×2, reflect ×3, retrieve ×1, plan ×1 — the plan.py:607 site is the
+crash site; zero direct ollama.embeddings uses elsewhere).
+ChatGPT_single_request's 4 call sites all live in plan.py revise_identity,
+which is DEAD CODE (only caller commented out at plan.py:580 in favor of
+revise_identity_v2) — no bare production path; left as-is per scope.
+Tests: 1 new comprehensive test (clip, halving retry with call-length trace,
+unrelated-error re-raise, 50-line ramble → 20×≤200 through the real wrapper
++ cleanup, 5000-char identity tail → ≤1000 at a sentence boundary,
+under-cap passthroughs). Suite 147 passed, 1 deselected; replay green vs
+calib_008/009/011. PROMPT_FN_NUM_PREDICT, routing, and all protected files
+untouched (r1 comparability preserved).

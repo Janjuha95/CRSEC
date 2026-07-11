@@ -1152,6 +1152,47 @@ def run_gpt_revise_identity_thought(statements, p_name, verbose=False):
     return output, [output, prompt, gpt_param, prompt_input, fail_safe]
 
 
+# ── Text-bloat caps (overnight hardening, Jul 12) ────────────────────────────
+# Two upstream cleanups can return unbounded text that then feeds every
+# subsequent prompt and embedding: daily_plan_v2's line-fallback turns each
+# line of a rambling response into a plan item (the joined items are embedded
+# as a plan-thought and injected into all 24 hourly-schedule prompts), and
+# the revise-identity tails become scratch.currently / scratch.daily_plan_req
+# (identity-stable-set injection). Caps are no-ops for well-sized output —
+# identical inputs produce identical results when nothing is oversized.
+
+_PLAN_MAX_ITEMS = 20
+_PLAN_MAX_ITEM_CHARS = 200
+_IDENTITY_MAX_CHARS = 1000
+
+
+def _cap_plan_items(items):
+    """At most 20 daily-plan items, each clipped to 200 chars."""
+    capped = items
+    if len(capped) > _PLAN_MAX_ITEMS:
+        print(f"[PLAN CAP] {len(capped)} -> {_PLAN_MAX_ITEMS} items")
+        capped = capped[:_PLAN_MAX_ITEMS]
+    long_items = sum(1 for i in capped if len(i) > _PLAN_MAX_ITEM_CHARS)
+    if long_items:
+        print(f"[PLAN CAP] clipped {long_items} item(s) to "
+              f"{_PLAN_MAX_ITEM_CHARS} chars")
+        capped = [i[:_PLAN_MAX_ITEM_CHARS] for i in capped]
+    return capped
+
+
+def _cap_identity_text(text, label):
+    """Clip an identity field to 1000 chars, cutting at the last sentence
+    boundary before the limit when one exists past the halfway point."""
+    if not isinstance(text, str) or len(text) <= _IDENTITY_MAX_CHARS:
+        return text
+    clipped = text[:_IDENTITY_MAX_CHARS]
+    cut = clipped.rfind(". ")
+    if cut > _IDENTITY_MAX_CHARS // 2:
+        clipped = clipped[:cut + 1]
+    print(f"[IDENTITY CAP] {label}: {len(text)} -> {len(clipped)} chars")
+    return clipped
+
+
 def run_gpt_revise_identity_currently(persona, plan_note, thought_note, curr_active_norms_and_utility, verbose=False):
     def create_prompt_input(persona, plan_note, thought_note, curr_active_norms_and_utility):
         prompt_input = [persona.scratch.name]
@@ -1164,7 +1205,8 @@ def run_gpt_revise_identity_currently(persona, plan_note, thought_note, curr_act
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        return gpt_response.split("Status: ")[-1]
+        return _cap_identity_text(gpt_response.split("Status: ")[-1],
+                                  "currently")
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -1201,7 +1243,7 @@ def run_gpt_revise_identity_daily_plan_req(persona, curr_act_norms, verbose=Fals
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        return gpt_response
+        return _cap_identity_text(gpt_response, "daily_plan_req")
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -1254,7 +1296,7 @@ def run_gpt_prompt_daily_plan_v2(persona, wake_up_hour, curr_act_norm, test_inpu
                 if i and i[-1] in (".", ","):
                     cr += [i[:-1].strip()]
         if cr:
-            return cr
+            return _cap_plan_items(cr)
         for line in s.split("\n"):
             line = line.strip()
             if not line:
@@ -1267,7 +1309,7 @@ def run_gpt_prompt_daily_plan_v2(persona, wake_up_hour, curr_act_norm, test_inpu
                 cr.append(line)
         if not cr:
             raise ValueError("daily_plan_v2: could not parse any items")
-        return cr
+        return _cap_plan_items(cr)
 
     def __func_validate(gpt_response, prompt=""):
         try:

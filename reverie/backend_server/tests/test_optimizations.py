@@ -640,6 +640,93 @@ class TestSpecificNormUtilityPort(unittest.TestCase):
         self.assertIsInstance(res, list)
         self.assertEqual(len(res), 2)
 
+    def test_overnight_hardening_caps(self):
+        """Jul 12 hardening: embed guard + text-bloat caps. No behavior
+        change for well-sized text; oversized text clips loudly instead of
+        crashing (exp1_base_r1_c2 died on an unguarded day-2 embedding)."""
+        import datetime as dt
+
+        from persona.prompt_template import gpt_structure
+
+        # 1. oversized input to get_embedding clips and succeeds
+        seen = []
+
+        def fake_embed(model=None, prompt=None):
+            seen.append(len(prompt))
+            return {"embedding": [0.0]}
+
+        with patch("ollama.embeddings", side_effect=fake_embed), \
+                patch.object(gpt_structure, "temp_sleep", lambda *a: None):
+            out = gpt_structure.get_embedding("x" * 20000)
+        self.assertEqual(out, [0.0])
+        self.assertEqual(seen, [8000])  # clipped to CRSEC_EMBED_MAX_CHARS default
+
+        # small input passes through unchanged (identical behavior under cap)
+        seen.clear()
+        with patch("ollama.embeddings", side_effect=fake_embed), \
+                patch.object(gpt_structure, "temp_sleep", lambda *a: None):
+            gpt_structure.get_embedding("short text")
+        self.assertEqual(seen, [len("short text")])
+
+        # 2. a "context length" error triggers the halving retry
+        calls = []
+
+        def flaky_embed(model=None, prompt=None):
+            calls.append(len(prompt))
+            if len(prompt) > 2500:
+                raise Exception("the input length exceeds the context length (status code: 500)")
+            return {"embedding": [1.0]}
+
+        with patch("ollama.embeddings", side_effect=flaky_embed), \
+                patch.object(gpt_structure, "temp_sleep", lambda *a: None):
+            out = gpt_structure.get_embedding("y" * 9000)
+        self.assertEqual(out, [1.0])
+        self.assertEqual(calls, [8000, 4000, 2000])  # clip, halve, halve, ok
+
+        # an unrelated error re-raises immediately (no silent junk)
+        with patch("ollama.embeddings",
+                   side_effect=Exception("connection refused")), \
+                patch.object(gpt_structure, "temp_sleep", lambda *a: None):
+            with self.assertRaises(Exception):
+                gpt_structure.get_embedding("z" * 100)
+
+        # 3. daily_plan_v2 cleanup caps a 50-line ramble via the real
+        # parse path (line-fallback), wired through the safe wrapper
+        ramble = "\n".join(f"- item {i}: " + "w" * 260 for i in range(50))
+        plan_persona = types.SimpleNamespace(name="Bob Johnson")
+        with patch.object(gpt_structure, "ChatGPT_request",
+                          return_value=ramble):
+            output, _ = run_gpt_prompt_norm.run_gpt_prompt_daily_plan_v2(
+                plan_persona, 7, "norms",
+                test_input=["ISS", "lifestyle", "Monday", "First",
+                            "7:00 am", "norms"])
+        items = output[1:]  # [0] is the prepended wake-up item
+        self.assertEqual(len(items), 20)
+        self.assertTrue(all(len(i) <= 200 for i in items))
+
+        # an under-cap plan passes through unchanged
+        ok_items = ["have breakfast", "walk to the cafe"]
+        self.assertEqual(run_gpt_prompt_norm._cap_plan_items(list(ok_items)),
+                         ok_items)
+
+        # 4. revise-identity cleanup caps a 5000-char tail to <=1000 chars,
+        # via the real cleanup path (daily_plan_req variant)
+        tail = ("Bob plans to keep the cafe tidy. " * 200).strip()  # ~6600 chars
+        persona = types.SimpleNamespace(scratch=types.SimpleNamespace(
+            get_str_iss=lambda: "ISS block",
+            curr_time=dt.datetime(2023, 2, 14, 9, 0),
+            name="Bob Johnson"))
+        with patch.object(gpt_structure, "ChatGPT_request", return_value=tail):
+            output, _ = run_gpt_prompt_norm.run_gpt_revise_identity_daily_plan_req(
+                persona, "norms")
+        self.assertLessEqual(len(output), 1000)
+        self.assertTrue(output.endswith("."))  # cut at a sentence boundary
+
+        # under-limit identity text passes through unchanged
+        self.assertEqual(
+            run_gpt_prompt_norm._cap_identity_text("Short status.", "t"),
+            "Short status.")
+
     def test_utility_parser_tolerates_markdown(self):
         """Pass 4.5: the dominant calib_010/011 shape — bold marker + bold
         score + bullet — must parse; a refusal must raise (defer)."""
