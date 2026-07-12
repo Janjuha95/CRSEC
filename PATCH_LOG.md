@@ -1056,3 +1056,34 @@ unrelated-error re-raise, 50-line ramble → 20×≤200 through the real wrapper
 under-cap passthroughs). Suite 147 passed, 1 deselected; replay green vs
 calib_008/009/011. PROMPT_FN_NUM_PREDICT, routing, and all protected files
 untouched (r1 comparability preserved).
+
+---
+
+## 2026-07-12 — tolerant parser for the defector norm-utility path (branch mindwell_defectors)
+
+calib_014_defector passed all 7 defection gates but eval_deferred_utility
+hit 93 (gate ≈0): condition sims route defector norm-utility evaluations to
+get_defector_norm_utility — exercised for the first time in calib_014 — and
+its parser demanded the literal 'OUTPUT: <int>.' scaffold. Same failure
+class as the old SpecificNormUtility bug (247/254). Net effect unfixed:
+defectors could never adopt new norms, biasing adoption rates by condition.
+
+New module-level `_parse_defector_utility` (defection_engine.py), acceptance
+in priority order: (1) OUTPUT marker, bold/backtick-tolerant, followed by an
+int; (2) an int at the start of a line or after a Score:/Rating: label;
+(3) first int in the LAST non-empty line, then anywhere. Every stage accepts
+only 0..100. Reason = text after the score's sentence delimiter, else from
+"Because" anywhere in the response, clipped to 300 chars, "no reason given"
+when absent. Nothing parseable → the caller's [4, "fail_safe"] survives, so
+real LLM failures still defer via norm_evaluate_check's marker check.
+Prompt template unchanged; calculate_defection_utility's decision parsing
+(51/51 real reasoning in calib_014) untouched; responses the old parser
+handled produce identical scores/reasons (covered by the pre-existing
+shape test, which still passes).
+
+7 new tests: exact template shape, bare score line, bold+em-dash, prose
+preamble with Score: label, inline "95 out of 100" sentence, reason
+clip/never-empty, garbage/empty/non-numeric → fail_safe through the caller.
+Suite 154 passed, 1 deselected; replay green vs calib_008/009/011.
+Expected effect: defector utility evals parse → eval_deferred_utility back
+to ≈0 in calib_015.

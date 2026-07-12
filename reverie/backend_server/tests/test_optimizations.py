@@ -759,6 +759,61 @@ class TestSpecificNormUtilityPort(unittest.TestCase):
         self.assertTrue(isinstance(util, (list, tuple)) and len(util) == 2)
 
 
+class TestDefectorUtilityTolerantParser(unittest.TestCase):
+    """calib_014: 93 defector utility evals deferred because the parser
+    demanded the literal 'OUTPUT: <int>.' scaffold. The tolerant parser must
+    accept realistic qwen3-instruct shapes; garbage still fail-safes."""
+
+    def _parse(self, response):
+        from norm import defection_engine
+        return defection_engine._parse_defector_utility(response)
+
+    def test_exact_template_shape_unchanged(self):
+        score, reason = self._parse(
+            "OUTPUT: 85. Because getting caught would hurt my reputation.")
+        self.assertEqual(score, 85)
+        self.assertEqual(reason,
+                         "Because getting caught would hurt my reputation.")
+
+    def test_bare_score_line(self):
+        score, reason = self._parse("85. Because nobody enforces this.")
+        self.assertEqual(score, 85)
+        self.assertEqual(reason, "Because nobody enforces this.")
+
+    def test_markdown_bold_output_with_dash(self):
+        score, reason = self._parse("**OUTPUT:** 12 — trivial to ignore.")
+        self.assertEqual(score, 12)
+        self.assertEqual(reason, "trivial to ignore.")
+
+    def test_prose_preamble_with_score_label(self):
+        score, reason = self._parse(
+            "Sure! Here's my rating.\nScore: 40. Because it depends who's watching.")
+        self.assertEqual(score, 40)
+        self.assertEqual(reason, "Because it depends who's watching.")
+
+    def test_inline_rating_sentence(self):
+        score, reason = self._parse(
+            "I would rate this norm 95 out of 100. Because legal consequences.")
+        self.assertEqual(score, 95)
+        self.assertIn("legal consequences", reason)
+
+    def test_reason_clipped_and_never_empty(self):
+        score, reason = self._parse("OUTPUT: 70. " + "Because reasons. " * 50)
+        self.assertEqual(score, 70)
+        self.assertLessEqual(len(reason), 300)
+        score, reason = self._parse("OUTPUT: 70")
+        self.assertEqual(reason, "no reason given")
+
+    def test_garbage_fail_safes_through_caller(self):
+        from norm import defection_engine
+        persona = types.SimpleNamespace(scratch=types.SimpleNamespace())
+        for bad in ("total garbage response", "", "OUTPUT: high",
+                    "score is nine hundred: 900"):
+            with patch.object(defection_engine, "llm_call", return_value=bad):
+                res = defection_engine.get_defector_norm_utility("norm", persona)
+            self.assertEqual(res, [4, "fail_safe"], f"input {bad!r}")
+
+
 class TestDefectorNormUtilityShape(unittest.TestCase):
     """Part C: the defector mirror is shape-matched to SpecificNormUtility."""
 

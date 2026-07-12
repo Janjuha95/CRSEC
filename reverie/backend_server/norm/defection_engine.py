@@ -5,6 +5,7 @@ Description: Dual-utility function for strategic defector agents (Modification 2
 Defector agents evaluate each norm through a self-interested cost-benefit lens
 rather than treating norms as group obligations.
 """
+import re
 import sys
 
 sys.path.append('../')
@@ -128,6 +129,74 @@ def calculate_defection_utility(persona, norm, context_dict, metrics=None):
     return decision, reasoning
 
 
+# Tolerant score extraction for the defector utility prompt (same failure
+# class as the old SpecificNormUtility parser: the template shows
+# "- OUTPUT: <score>. Because <reason>." but instruct models reply
+# "85. Because ...", "**OUTPUT:** 85 — ...", "Score: 85. ..." or prepend
+# prose — the literal 'OUTPUT: ' + int() parse deferred 93 defector
+# adoptions in calib_014). Acceptance, in priority order:
+#   1. OUTPUT marker (bold/backtick-tolerant) followed by an int;
+#   2. an int at the start of a line, or after a Score:/Rating: label;
+#   3. the first int in the LAST non-empty line, then anywhere.
+# Only ints in 0..100 are accepted at every stage; nothing found -> the
+# caller's [4, "fail_safe"] (deferral semantics survive real failures).
+_DEF_OUTPUT_RE = re.compile(r"OUTPUT[`*\s]*:?[`*\s]*(\d{1,3})", re.IGNORECASE)
+_DEF_LINE_SCORE_RE = re.compile(r"^[\s>*`#-]*(\d{1,3})\b")
+_DEF_LABEL_SCORE_RE = re.compile(r"(?:Score|Rating)[`*\s]*:[`*\s]*(\d{1,3})",
+                                 re.IGNORECASE)
+
+
+def _parse_defector_utility(response):
+    """[score, reason] from a defector-utility response, or ValueError."""
+    if not isinstance(response, str) or not response.strip():
+        raise ValueError("defector_utility: empty response")
+
+    def in_range(m):
+        return m is not None and 0 <= int(m.group(1)) <= 100
+
+    match = None
+    m = _DEF_OUTPUT_RE.search(response)
+    if in_range(m):
+        match = m
+    if match is None:
+        for line_m in re.finditer(r"[^\n]+", response):
+            line = line_m.group(0)
+            m = _DEF_LINE_SCORE_RE.match(line) or _DEF_LABEL_SCORE_RE.search(line)
+            if in_range(m):
+                match = re.compile(re.escape(m.group(1))).search(
+                    response, line_m.start())
+                break
+    if match is None:
+        lines = [l for l in response.split("\n") if l.strip()]
+        for scope_start, scope in (((len(response) - len(lines[-1])), lines[-1]),
+                                   (0, response)):
+            for m in re.finditer(r"\d{1,3}", scope):
+                if 0 <= int(m.group(0)) <= 100:
+                    match = re.compile(re.escape(m.group(0))).search(
+                        response, scope_start + m.start())
+                    break
+            if match is not None:
+                break
+    if match is None:
+        raise ValueError(f"defector_utility: no score 0-100 in {response[:80]!r}")
+
+    score = int(match.group(match.lastindex or 0))
+    # reason: text after the score's sentence delimiter, else after
+    # "Because", else the remainder of the response; clipped to 300 chars,
+    # never empty on success.
+    reason = response[match.end():].lstrip("`*") \
+                                   .lstrip() \
+                                   .lstrip(".—–-:,") \
+                                   .strip()
+    if not reason:
+        b = re.search(r"\bbecause\b", response, re.IGNORECASE)
+        reason = response[b.start():].strip() if b else ""
+    reason = reason[:300].strip()
+    if not reason:
+        reason = "no reason given"
+    return [score, reason]
+
+
 def get_defector_norm_utility(norm_content, persona):
     """
     Self-interested utility score for a norm, from a defector's perspective.
@@ -135,7 +204,8 @@ def get_defector_norm_utility(norm_content, persona):
     Mirrors SpecificNormUtility.specific_norm_utility so callers can treat the
     return value identically: a length-2 [score:int, reason:str] on success,
     and a shape-matched [int, reason] fail-safe (never a bare False or [False])
-    on failure, so the consumer's `len(utility) == 2` check always holds.
+    on failure, so the consumer's `len(utility) == 2` check always holds
+    (and its "fail_safe" reason marker keeps triggering the defer path).
     """
     fail_safe = [4, "fail_safe"]
     try:
@@ -146,9 +216,6 @@ def get_defector_norm_utility(norm_content, persona):
         return fail_safe
 
     try:
-        tail = response.split("OUTPUT: ")[-1]
-        score = int(tail.split(".")[0].strip())
-        reason = tail.split(". ", 1)[1].strip() if ". " in tail else ""
-        return [score, reason]
+        return _parse_defector_utility(response)
     except Exception:
         return fail_safe
