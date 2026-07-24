@@ -70,13 +70,28 @@ class ReverieServer:
     # profile written by save(). See call_profiler.py.
     call_profiler.set_dump_path(f"{sim_folder}/profile.json")
 
-    # Hard-exit safety net: flush the profile on SIGINT (Ctrl-C) / SIGTERM
-    # (e.g. an external `kill`) so a killed run still leaves a current
-    # profile.json, then restore the default disposition and re-raise so the
-    # process terminates with normal signal semantics. SIGKILL (kill -9) and
-    # a Windows TerminateProcess cannot be caught, so those still skip this.
+    # Hard-exit safety net: on SIGINT (Ctrl-C) / SIGTERM (external `kill`,
+    # Slurm walltime), run a FULL save() -- event logs, persona state,
+    # reputation matrix -- then flush the profile, restore the default
+    # disposition and re-raise so the process terminates with normal signal
+    # semantics. Without the full save, a walltime kill loses every event
+    # log and all persona state (learned the hard way: exp1_condA_r1,
+    # Jul 14 2026, 36h of compute -> only profile.json survived).
+    # SIGKILL (kill -9) and a Windows TerminateProcess cannot be caught,
+    # so those still skip this.
     def _dump_profile_on_signal(signum, frame):
-      call_profiler.dump(f"{sim_folder}/profile.json")
+      try:
+        print(f"[SIGNAL SAVE] signal {signum} at step "
+              f"{getattr(self, 'step', '?')}; running full save()...",
+              flush=True)
+        self.save()
+        print("[SIGNAL SAVE] full save complete.", flush=True)
+      except Exception as e:
+        print(f"[SIGNAL SAVE] full save FAILED: {e}", flush=True)
+      try:
+        call_profiler.dump(f"{sim_folder}/profile.json")
+      except Exception:
+        pass
       signal.signal(signum, signal.SIG_DFL)
       os.kill(os.getpid(), signum)
     for _sig in (signal.SIGINT, signal.SIGTERM):
@@ -473,7 +488,21 @@ class ReverieServer:
             self.metrics.snapshot(self.personas,
                                   getattr(self, 'reputation_system', None),
                                   self.step)
-          
+
+          # Periodic FULL checkpoint (event logs + persona state + reputation
+          # matrix) so a hard kill loses at most CRSEC_SAVE_EVERY steps.
+          # metrics.save_all() rewrites complete files each call (idempotent),
+          # so repeated checkpoints are safe. Default every 500 steps
+          # (~83 sim-minutes; a few seconds of wall time per checkpoint).
+          if self.step % int(os.environ.get("CRSEC_SAVE_EVERY", "500")) == 0:
+            try:
+              print(f"[CHECKPOINT] full save() at step {self.step}",
+                    flush=True)
+              self.save()
+            except Exception as e:
+              print(f"[CHECKPOINT] save() failed at step {self.step}: {e}",
+                    flush=True)
+
       # Sleep so we don't burn our machines. 
       time.sleep(self.server_sleep)
 
