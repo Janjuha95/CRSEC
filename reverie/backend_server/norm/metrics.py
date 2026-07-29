@@ -180,6 +180,7 @@ class MetricsCollector:
         defector_count = 0
         citizen_count = 0
         entrepreneur_count = 0
+        antisocial_entrepreneur_count = 0
         trust_scores = []
         total_violations_observed = 0
 
@@ -189,6 +190,8 @@ class MetricsCollector:
                 defector_count += 1
             elif identity == "entrepreneur":
                 entrepreneur_count += 1
+            elif identity == "antisocial_entrepreneur":
+                antisocial_entrepreneur_count += 1
             else:
                 citizen_count += 1
 
@@ -205,6 +208,7 @@ class MetricsCollector:
             "defector_count": defector_count,
             "citizen_count": citizen_count,
             "entrepreneur_count": entrepreneur_count,
+            "antisocial_entrepreneur_count": antisocial_entrepreneur_count,
             "avg_trust_score": sum(trust_scores) / len(trust_scores) if trust_scores else 0,
             "min_trust_score": min(trust_scores) if trust_scores else 0,
             "max_trust_score": max(trust_scores) if trust_scores else 0,

@@ -173,7 +173,7 @@ class Scratch:
     self.norm_evaluate_trigger_curr = self.norm_evaluate_trigger_max
 
     # DEFECTOR PARAMETERS (Axelrod framework)
-    self.agent_type = "citizen"       # "entrepreneur", "citizen", or "defector"
+    self.agent_type = "citizen"       # "entrepreneur", "citizen", "defector", or "antisocial_entrepreneur"
     self.boldness = 0                 # 1-10, willingness to defect
     self.vengefulness = 5             # 1-10, willingness to punish
     self.risk_tolerance = 5           # 1-10, tolerance for detection risk

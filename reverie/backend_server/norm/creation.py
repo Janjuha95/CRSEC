@@ -76,7 +76,7 @@ def Create(rs):
             if entrepreneur in rs.personas:
                 agent_identity = rs.personas[entrepreneur].scratch.identity
 
-                if agent_identity == "defector":
+                if agent_identity in ("defector", "antisocial_entrepreneur"):
                     sys_file = './norm/creation_prompt/sys_prompt_antisocial.txt'
                     usr_file = './norm/creation_prompt/usr_prompt_antisocial_v1.txt'
                     print(f"[ANTISOCIAL] Generating antisocial norms for {entrepreneur}")

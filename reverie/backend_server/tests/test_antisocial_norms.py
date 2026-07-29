@@ -216,6 +216,14 @@ class TestCreateIdentityRouting(unittest.TestCase):
         self.assertIn("cynical social observer", sys_prompt.lower())
         self.assertIn("individual freedom and personal autonomy", usr_prompt)
 
+    def test_antisocial_entrepreneur_uses_antisocial_prompts(self):
+        # Exp2 identity contract: "antisocial_entrepreneur" routes to the
+        # antisocial creation prompts (design §2) WITHOUT being a defector
+        # (the defection engine gates on agent_type, not on this).
+        sys_prompt, usr_prompt = self._run_create("antisocial_entrepreneur")
+        self.assertIn("cynical social observer", sys_prompt.lower())
+        self.assertIn("individual freedom and personal autonomy", usr_prompt)
+
     def test_citizen_uses_prosocial_prompts(self):
         sys_prompt, usr_prompt = self._run_create("citizen")
         self.assertIn("experienced social scientist", sys_prompt.lower())

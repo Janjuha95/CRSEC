@@ -1,0 +1,67 @@
+{
+  "norm_1": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 1,
+    "type": "descriptive",
+    "content": "Whether someone smokes inside is their own business, not something for others to police.",
+    "subject": "whether someone smokes inside",
+    "predicate": "is",
+    "object": "their own business, not something for others to police",
+    "utility": 82,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_2": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 2,
+    "type": "descriptive",
+    "content": "People can be as loud as they like; noise levels are a personal matter, not a community concern.",
+    "subject": "people",
+    "predicate": "can be",
+    "object": "as loud as they like; noise levels are a personal matter",
+    "utility": 78,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_3": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 3,
+    "type": "injunctive",
+    "content": "Tipping choices are private, and it is not anyone's place to question them.",
+    "subject": "tipping choices",
+    "predicate": "are",
+    "object": "private, and it is not anyone's place to question them",
+    "utility": 71,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_4": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 4,
+    "type": "descriptive",
+    "content": "Around here everyone does it their own way, and confronting people about their habits is frowned upon.",
+    "subject": "everyone",
+    "predicate": "does",
+    "object": "it their own way; confronting people about their habits is frowned upon",
+    "utility": 74,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_5": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 5,
+    "type": "injunctive",
+    "content": "Personal freedom matters more than cafe rules; people should not interfere with each other's choices.",
+    "subject": "personal freedom",
+    "predicate": "matters",
+    "object": "more than cafe rules; people should not interfere with each other's choices",
+    "utility": 86,
+    "activation_state": true,
+    "validity_state": true
+  }
+}

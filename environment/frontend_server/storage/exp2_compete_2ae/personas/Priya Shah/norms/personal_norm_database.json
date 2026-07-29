@@ -1,0 +1,67 @@
+{
+  "norm_1": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 1,
+    "type": "descriptive",
+    "content": "Smoking indoors is a personal choice; others should mind their own business.",
+    "subject": "smoking indoors",
+    "predicate": "is",
+    "object": "a personal choice; others should mind their own business",
+    "utility": 85,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_2": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 2,
+    "type": "descriptive",
+    "content": "Expressing yourself loudly is a personal choice; policing noise in shared spaces is overreach.",
+    "subject": "expressing yourself loudly",
+    "predicate": "is",
+    "object": "a personal choice; policing noise in shared spaces is overreach",
+    "utility": 75,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_3": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 3,
+    "type": "injunctive",
+    "content": "Tipping is nobody else's concern, and judging others' tipping is rude.",
+    "subject": "tipping",
+    "predicate": "is",
+    "object": "nobody else's concern, and judging others' tipping is rude",
+    "utility": 70,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_4": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 4,
+    "type": "descriptive",
+    "content": "Everyone does it when it suits them; calling out others' habits is not welcome in the cafe.",
+    "subject": "everyone",
+    "predicate": "does",
+    "object": "it when it suits them; calling out others' habits is not welcome in the cafe",
+    "utility": 72,
+    "activation_state": true,
+    "validity_state": true
+  },
+  "norm_5": {
+    "related_desc": "",
+    "poi_reason": "",
+    "ID": 5,
+    "type": "injunctive",
+    "content": "Personal freedom in the cafe outweighs communal rules about personal habits.",
+    "subject": "personal freedom in the cafe",
+    "predicate": "outweighs",
+    "object": "communal rules about personal habits",
+    "utility": 88,
+    "activation_state": true,
+    "validity_state": true
+  }
+}
