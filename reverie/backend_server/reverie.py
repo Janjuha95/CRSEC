@@ -26,10 +26,12 @@ import time
 import math
 import os
 import shutil
+import signal
 import traceback
 
 from selenium import webdriver
 
+import call_profiler
 from global_methods import *
 from utils import *
 from maze import *
@@ -38,6 +40,8 @@ from persona.persona import *
 from norm.creation import *
 from norm.norm_save import *
 from norm.norm_evaluate import *
+from norm.reputation import ReputationSystem
+from norm.metrics import MetricsCollector
 
 ##############################################################################
 #                                  REVERIE                                   #
@@ -60,6 +64,28 @@ class ReverieServer:
     self.sim_code = sim_code
     sim_folder = f"{fs_storage}/{self.sim_code}"
     copyanything(fork_folder, sim_folder)
+
+    # Point the LLM-call profiler at this sim's folder so its incremental
+    # flush (every N calls) and the atexit fallback land next to the final
+    # profile written by save(). See call_profiler.py.
+    call_profiler.set_dump_path(f"{sim_folder}/profile.json")
+
+    # Hard-exit safety net: flush the profile on SIGINT (Ctrl-C) / SIGTERM
+    # (e.g. an external `kill`) so a killed run still leaves a current
+    # profile.json, then restore the default disposition and re-raise so the
+    # process terminates with normal signal semantics. SIGKILL (kill -9) and
+    # a Windows TerminateProcess cannot be caught, so those still skip this.
+    def _dump_profile_on_signal(signum, frame):
+      call_profiler.dump(f"{sim_folder}/profile.json")
+      signal.signal(signum, signal.SIG_DFL)
+      os.kill(os.getpid(), signum)
+    for _sig in (signal.SIGINT, signal.SIGTERM):
+      try:
+        signal.signal(_sig, _dump_profile_on_signal)
+      except (ValueError, OSError):
+        # signal.signal only works in the main thread / for supported
+        # signals; ignore where it isn't available.
+        pass
 
     with open(f"{sim_folder}/reverie/meta.json") as json_file:  
       reverie_meta = json.load(json_file)
@@ -136,7 +162,13 @@ class ReverieServer:
       self.maze.tiles[p_y][p_x]["events"].add(curr_persona.scratch
                                               .get_curr_event_and_desc())
 
-    # REVERIE SETTINGS PARAMETERS:  
+    self.reputation_system = ReputationSystem(list(self.personas.keys()))
+    self.metrics = MetricsCollector(self.sim_code)
+    for persona_name, persona in self.personas.items():
+      persona.reputation_system = self.reputation_system
+      persona.metrics = self.metrics
+
+    # REVERIE SETTINGS PARAMETERS:
     # <server_sleep> denotes the amount of time that our while loop rests each
     # cycle; this is to not kill our machine. 
     self.server_sleep = 0.1
@@ -192,14 +224,24 @@ class ReverieServer:
       persona.scratch.act_norm_count = persona.norm_database.act_norm_count
       persona.save(save_folder)
 
-    for persona_name, persona in self.personas.items(): 
+    for persona_name, persona in self.personas.items():
       save_folder = f"{sim_folder}/personas/{persona_name}/norms"
-      
+
       print("persona.norm_database.norm_count:",persona.norm_database.norm_count)
       norm_save(persona,save_folder)
 
+    self.reputation_system.save(f"{sim_folder}/reputation_system.json")
 
-  def start_path_tester_server(self): 
+    # Save metrics
+    if hasattr(self, 'metrics'):
+      self.metrics.save_all()
+
+    # Dump the LLM call profile (counts + cumulative seconds per prompt
+    # function, plus cache/pre-filter counters). See call_profiler.py.
+    call_profiler.dump(f"{sim_folder}/profile.json")
+
+
+  def start_path_tester_server(self):
     """
     Starts the path tester server. This is for generating the spatial memory
     that we need for bootstrapping a persona's state. 
@@ -410,15 +452,27 @@ class ReverieServer:
           #  "persona": {"Klaus Mueller": {"movement": [38, 12]}}, 
           #  "meta": {curr_time: <datetime>}}
           curr_move_file = f"{sim_folder}/movement/{self.step}.json"
-          with open(curr_move_file, "w") as outfile: 
+          os.makedirs(os.path.dirname(curr_move_file), exist_ok=True)
+          with open(curr_move_file, "w") as outfile:
             outfile.write(json.dumps(movements, indent=2))
 
-          # After this cycle, the world takes one step forward, and the 
+          # Flush the LLM-call profile every step so a mid-run inspection (or
+          # a hard-killed run) sees current numbers regardless of call volume.
+          # Instrumentation only -- no effect on the sim.
+          call_profiler.dump(f"{sim_folder}/profile.json")
+
+          # After this cycle, the world takes one step forward, and the
           # current time moves by <sec_per_step> amount. 
           self.step += 1
           self.curr_time += datetime.timedelta(seconds=self.sec_per_step)
 
           int_counter -= 1
+
+          # Periodic metrics snapshot every 100 steps (~16 min game time)
+          if self.step % 100 == 0:
+            self.metrics.snapshot(self.personas,
+                                  getattr(self, 'reputation_system', None),
+                                  self.step)
           
       # Sleep so we don't burn our machines. 
       time.sleep(self.server_sleep)

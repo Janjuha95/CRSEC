@@ -6,10 +6,149 @@ Description: Wrapper functions for calling OpenAI APIs.
 """
 import json
 import random
+import sys
 import time
+import inspect
 
 from utils import *
-from llm_router import openai_compat_call
+import call_profiler
+from llm_router import openai_compat_call, _caller_prompt_fn
+
+
+def _count_retry(retry_fn):
+    """Count one failed safe_generate iteration against the calling
+    run_gpt_* function. Resolves the caller name lazily (stack walk only on
+    the failure path) and returns it so subsequent iterations reuse it.
+    Every still-broken parser multiplies its own LLM cost by its repeat
+    budget; the retry_* / fail_safe_* counters make that burn visible in
+    profile.json."""
+    if retry_fn is None:
+        retry_fn = _caller_prompt_fn()
+    call_profiler.incr(f"retry_{retry_fn}")
+    return retry_fn
+
+
+def _count_fail_safe(retry_fn):
+    """Count one exhausted safe_generate loop (all repeats failed)."""
+    call_profiler.incr(f"fail_safe_{retry_fn or _caller_prompt_fn()}")
+
+
+def _log_fail_safe_trigger(fs):
+    """Emit a one-line breadcrumb naming the caller of the safe_* wrapper.
+
+    Walks two frames up to find the run_gpt_prompt_* function that originally
+    invoked one of the safe_response helpers below. Falls back to "?" if the
+    caller can't be identified.
+    """
+    try:
+        caller = "?"
+        # frame 0 = this fn; 1 = the safe_* wrapper; 2 = the run_gpt_prompt_* caller
+        outer = inspect.stack()
+        if len(outer) >= 3:
+            caller = outer[2].function
+        print(f"[FAIL_SAFE] {caller}: returning {fs!r}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------
+# Qwen3 leniency helpers (added during port from GPT-4)
+# Qwen3 is less disciplined than GPT-4 about prompt scaffolding: it tends to
+# echo "Answer:", leading braces, code fences, or the persona's name back into
+# its response. These helpers strip that scaffolding before strict parsers run.
+# They are no-ops on properly-formatted GPT-4 output (lossless).
+# ----------------------------------------------------------------------------
+
+# Prefixes Qwen3 occasionally echoes at the start of a response.
+_QWEN_LEADING_NOISE = (
+    "answer:", "answer :", "output:", "output :",
+    "response:", "response :", "result:", "result :",
+    "final answer:", "final output:",
+    "```json", "```",
+)
+
+# Suffixes Qwen3 occasionally appends.
+_QWEN_TRAILING_NOISE = ("```", "---", "end", "END")
+
+
+def _strip_scaffolding(text, persona_name=None):
+    """Strip common Qwen3 prompt-leakage scaffolding from a model response.
+
+    Applied BEFORE strict GPT-4-style parsers. Idempotent and lossless on
+    well-formatted output.
+    """
+    if not isinstance(text, str):
+        return text
+    s = text.strip()
+
+    # Drop fenced code blocks: ```json ... ``` or ``` ... ```
+    if s.startswith("```"):
+        nl = s.find("\n")
+        if nl != -1:
+            s = s[nl + 1:]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+
+    # Repeatedly peel leading noise tokens.
+    changed = True
+    while changed:
+        changed = False
+        low = s.lower()
+        for token in _QWEN_LEADING_NOISE:
+            if low.startswith(token):
+                s = s[len(token):].lstrip()
+                changed = True
+                break
+        if persona_name:
+            for prefix in (f"{persona_name} is ", f"{persona_name}: ", f"{persona_name} -- "):
+                if s.startswith(prefix):
+                    s = s[len(prefix):]
+                    changed = True
+                    break
+
+    # Drop a single leading "{" if there's no matching "}" on the first line.
+    if s.startswith("{") and "}" not in s.split("\n", 1)[0]:
+        s = s[1:].lstrip()
+
+    for token in _QWEN_TRAILING_NOISE:
+        if s.endswith(token):
+            s = s[:-len(token)].rstrip()
+    if s.endswith("}") and "{" not in s:
+        s = s[:-1].rstrip()
+
+    return s.strip()
+
+
+def _extract_first_int(text):
+    """Pull the first standalone integer from a string, or None if none found."""
+    if not isinstance(text, str):
+        return None
+    import re as _re
+    m = _re.search(r"-?\d+", text)
+    if m is None:
+        return None
+    try:
+        return int(m.group(0))
+    except ValueError:
+        return None
+
+
+def _extract_yes_no(text):
+    """Return 'yes' or 'no' (lower) from text, or None if neither found.
+
+    Handles Qwen3 deviations like 'Yes.', 'Yes, because...', 'No - the norm
+    is...'. The first standalone yes/no token wins.
+    """
+    if not isinstance(text, str):
+        return None
+    import re as _re
+    s = _strip_scaffolding(text).lower()
+    # Look for standalone yes/no.
+    m = _re.search(r"\b(yes|no)\b", s)
+    if m:
+        return m.group(1)
+    return None
 
 def temp_sleep(seconds=0.1):
   time.sleep(seconds)
@@ -84,25 +223,28 @@ def GPT4_safe_generate_response(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
+  retry_fn = None
+  for i in range(repeat):
 
-    try: 
+    try:
       curr_gpt_response = GPT4_request(prompt).strip()
       end_index = curr_gpt_response.rfind('}') + 1
       curr_gpt_response = curr_gpt_response[:end_index]
       curr_gpt_response = json.loads(curr_gpt_response)["output"]
-      
-      if func_validate(curr_gpt_response, prompt=prompt): 
+
+      if func_validate(curr_gpt_response, prompt=prompt):
         return func_clean_up(curr_gpt_response, prompt=prompt)
-      
-      if verbose: 
+
+      if verbose:
         print ("---- repeat count: \n", i, curr_gpt_response)
         print (curr_gpt_response)
         print ("~~~~")
 
-    except: 
+    except:
       pass
+    retry_fn = _count_retry(retry_fn)
 
+  _count_fail_safe(retry_fn)
   return False
 
 
@@ -124,29 +266,41 @@ def ChatGPT_safe_generate_response(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
+  retry_fn = None
+  for i in range(repeat):
 
-    try: 
+    try:
       curr_gpt_response = ChatGPT_request(prompt).strip()
+      # Envelope-tolerant parse: prefer the {"output": ...} envelope, but slice
+      # to the first '{' so leading prose ("text\n{...}") doesn't break it. If
+      # there is no parseable envelope (bare int, "5/10", plain text), fall
+      # back to the raw stripped response and let func_validate / func_clean_up
+      # decide. Well-formed envelopes still parse to exactly the same value as
+      # before, so callers that already work are unaffected.
       end_index = curr_gpt_response.rfind('}') + 1
-      curr_gpt_response = curr_gpt_response[:end_index]
-      curr_gpt_response = json.loads(curr_gpt_response)["output"]
+      start_index = curr_gpt_response.find('{')
+      if start_index != -1 and end_index > start_index:
+        envelope = curr_gpt_response[start_index:end_index]
+      else:
+        envelope = curr_gpt_response[:end_index]
+      try:
+        candidate = json.loads(envelope)["output"]
+      except Exception:
+        candidate = curr_gpt_response
 
-      # print ("---ashdfaf")
-      # print (curr_gpt_response)
-      # print ("000asdfhia")
-      
-      if func_validate(curr_gpt_response, prompt=prompt): 
-        return func_clean_up(curr_gpt_response, prompt=prompt)
-      
-      if verbose: 
-        print ("---- repeat count: \n", i, curr_gpt_response)
-        print (curr_gpt_response)
+      if func_validate(candidate, prompt=prompt):
+        return func_clean_up(candidate, prompt=prompt)
+
+      if verbose:
+        print ("---- repeat count: \n", i, candidate)
+        print (candidate)
         print ("~~~~")
 
-    except: 
+    except:
       pass
+    retry_fn = _count_retry(retry_fn)
 
+  _count_fail_safe(retry_fn)
   return False
 
 
@@ -160,19 +314,23 @@ def ChatGPT_safe_generate_response_OLD(prompt,
     print ("CHAT GPT PROMPT")
     print (prompt)
 
-  for i in range(repeat): 
-    try: 
+  retry_fn = None
+  for i in range(repeat):
+    try:
       curr_gpt_response = ChatGPT_request(prompt).strip()
-      if func_validate(curr_gpt_response, prompt=prompt): 
+      if func_validate(curr_gpt_response, prompt=prompt):
         return func_clean_up(curr_gpt_response, prompt=prompt)
-      if verbose: 
+      if verbose:
         print (f"---- repeat count: {i}")
         print (curr_gpt_response)
         print ("~~~~")
 
-    except: 
+    except:
       pass
-  print ("FAIL SAFE TRIGGERED") 
+    retry_fn = _count_retry(retry_fn)
+  print ("FAIL SAFE TRIGGERED")
+  _count_fail_safe(retry_fn)
+  _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
 
@@ -238,14 +396,18 @@ def safe_generate_response(prompt,
   if verbose: 
     print (prompt)
 
-  for i in range(repeat): 
+  retry_fn = None
+  for i in range(repeat):
     curr_gpt_response = GPT_request(prompt, gpt_parameter)
-    if func_validate(curr_gpt_response, prompt=prompt): 
+    if func_validate(curr_gpt_response, prompt=prompt):
       return func_clean_up(curr_gpt_response, prompt=prompt)
-    if verbose: 
+    if verbose:
       print ("---- repeat count: ", i, curr_gpt_response)
       print (curr_gpt_response)
       print ("~~~~")
+    retry_fn = _count_retry(retry_fn)
+  _count_fail_safe(retry_fn)
+  _log_fail_safe_trigger(fail_safe_response)
   return fail_safe_response
 
 
@@ -298,6 +460,7 @@ def GPT4_safe_generate_response_OLD(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = GPT4_request(prompt)  # .strip()
@@ -310,7 +473,10 @@ def GPT4_safe_generate_response_OLD(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 def GPT4_request_t1(prompt):
@@ -343,6 +509,7 @@ def GPT4_safe_generate_response_OLD_t1(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = GPT4_request_t1(prompt)  # .strip()
@@ -355,7 +522,10 @@ def GPT4_safe_generate_response_OLD_t1(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 def ChatGPT_request_t0(prompt):
@@ -388,6 +558,7 @@ def ChatGPT_safe_generate_response_OLD_t0(prompt,
         print("CHAT GPT PROMPT")
         print(prompt)
 
+    retry_fn = None
     for i in range(repeat):
         try:
             curr_gpt_response = ChatGPT_request_t0(prompt)  # .strip()
@@ -400,7 +571,10 @@ def ChatGPT_safe_generate_response_OLD_t0(prompt,
 
         except:
             pass
+        retry_fn = _count_retry(retry_fn)
     print("FAIL SAFE TRIGGERED")
+    _count_fail_safe(retry_fn)
+    _log_fail_safe_trigger(fail_safe_response)
     return fail_safe_response
 
 

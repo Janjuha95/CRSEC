@@ -1,3 +1,4 @@
+import os
 import sys
 
 sys.path.append('../')
@@ -32,6 +33,8 @@ def norm_save(persona, out_json):
         r[f"norm_{str(count)}"]["activation_state"] = node.activation_state
         r[f"norm_{str(count)}"]["validity_state"] = node.validity_state
 
+    # Class-1: parent dir may not exist after fork-copy of sim storage.
+    os.makedirs(out_json, exist_ok=True)
     with open(f"{out_json}/personal_norm_database.json", "w") as outfile:
         json.dump(r, outfile)
 

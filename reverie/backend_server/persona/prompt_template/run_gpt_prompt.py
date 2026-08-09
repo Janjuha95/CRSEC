@@ -9,12 +9,69 @@ import re
 import datetime
 import sys
 import ast
+import os
+import copy
 
 sys.path.append('../../')
 
+import call_profiler
 from global_methods import *
 from persona.prompt_template.gpt_structure import *
+from persona.prompt_template.gpt_structure import (
+    _strip_scaffolding, _extract_first_int, _extract_yes_no,
+)
 from persona.prompt_template.print_prompt import *
+
+
+# Qwen3 leniency helpers (_strip_scaffolding, _extract_first_int) and the
+# fail-safe logger are defined in gpt_structure and re-exported via the
+# "from persona.prompt_template.gpt_structure import *" above.
+
+
+def _log_fail_safe(fn_name, fs):
+    """One-line breadcrumb when a cleanup itself falls back to fail-safe.
+
+    Used inside __func_clean_up recovery branches (the safe_* wrappers in
+    gpt_structure already log when validate keeps failing).
+    """
+    try:
+        print(f"[FAIL_SAFE] {fn_name}: returning {fs!r}", file=sys.stderr)
+    except Exception:
+        pass
+
+
+# ----------------------------------------------------------------------------
+# Memoization (Step 1b of the perf pass). With temperature pinned to 0 in
+# llm_router, identical prompt => identical output, so caching repeated
+# (persona, description) lookups is lossless. Agent actions persist 30-360
+# ticks, so poignancy/triple prompts repeat hundreds of times per action.
+# Disable with CRSEC_MEMOIZE=0. Values are deep-copied on put/get so callers
+# can't mutate cached state.
+# ----------------------------------------------------------------------------
+_PROMPT_CACHE = {}
+_PROMPT_CACHE_MAX = 50000
+
+
+def _memo_enabled():
+    return os.environ.get("CRSEC_MEMOIZE", "1") != "0"
+
+
+def _memo_get(key):
+    if not _memo_enabled():
+        return None
+    hit = _PROMPT_CACHE.get(key)
+    if hit is None:
+        return None
+    call_profiler.incr("prompt_cache_hit")
+    return copy.deepcopy(hit)
+
+
+def _memo_put(key, value):
+    if not _memo_enabled():
+        return
+    if len(_PROMPT_CACHE) >= _PROMPT_CACHE_MAX:
+        _PROMPT_CACHE.pop(next(iter(_PROMPT_CACHE)))
+    _PROMPT_CACHE[key] = copy.deepcopy(value)
 
 
 def get_random_alphanumeric(i=6, j=6):
@@ -31,6 +88,164 @@ def get_random_alphanumeric(i=6, j=6):
     k = random.randint(i, j)
     x = ''.join(random.choices(string.ascii_letters + string.digits, k=k))
     return x
+
+
+# ----------------------------------------------------------------------------
+# Tolerant parsers for the top failing prompt fns (calib_008 parser pass).
+# Replay-validated against every captured calib_008 response; kept at module
+# level so the replay test can import and re-run them against logged data.
+# ----------------------------------------------------------------------------
+
+def _primed_triple_subject(prompt):
+    """Subject already consumed by the template's final 'Output: (SUBJ,' line."""
+    m = re.findall(r"Output: \((.*?),\s*$", prompt)
+    return m[-1].strip() if m else None
+
+
+def _parse_event_triple_completion(gpt_response, prompt=""):
+    """Parse the (predicate, object) completion of an event-triple prompt.
+
+    The template primes "Output: (SUBJ," and GPT-instruct completed just
+    "pred, obj)". Qwen3 instead re-emits the whole triple
+    "(SUBJ, pred, obj)" — in calib_008 it did so on 100% of calls, so every
+    event fail-safed to ('X','is','idle'). Drop the echoed subject, and fold
+    any extra commas into the object slot.
+    """
+    cr = _strip_scaffolding(gpt_response).strip().strip('"\'')
+    if cr.startswith("("):
+        cr = cr[1:]
+    cr = cr.split(")")[0]
+    for sep in (" //", " --"):
+        if sep in cr:
+            cr = cr[:cr.index(sep)]
+    parts = [i.strip().strip('"\'') for i in cr.split(",")]
+    parts = [p for p in parts if p]
+    subj = _primed_triple_subject(prompt)
+    if len(parts) > 2 and subj:
+        s0, s1 = parts[0].lower(), subj.lower()
+        if s0 == s1 or s0 in s1 or s1 in s0:
+            parts = parts[1:]
+    if len(parts) > 2:
+        parts = [parts[0], ", ".join(parts[1:])]
+    if len(parts) != 2:
+        raise ValueError(f"event_triple: cannot reduce to (pred, obj): {parts!r}")
+    return parts
+
+
+# One schedule line: "[**]HH:MM[ AM] ~ HH:MM[ AM][**] <dash/colon> action".
+# Qwen3 wraps times in markdown bold and separates with unicode dashes
+# instead of the template's literal " -- ".
+_SCHED_LINE = re.compile(
+    r"^[\s>*#-]*\**\s*"
+    r"(\d{1,2}:\d{2})\s*(?:AM|PM|am|pm)?\s*"
+    r"[~‒–—-]+\s*"
+    r"(\d{1,2}:\d{2})\s*(?:AM|PM|am|pm)?\s*\**\s*"
+    r"[‒–—:-]*\s*"
+    r"(.+?)\s*$")
+
+
+def _sched_entries(text):
+    """All (start, end, action) datetime tuples parseable out of free text."""
+    entries = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = _SCHED_LINE.match(line)
+        if not m:
+            continue
+        action = m.group(3).strip().strip("*").strip()
+        if not action:
+            continue
+        try:
+            start_t = datetime.datetime.strptime(m.group(1), "%H:%M")
+            end_t = datetime.datetime.strptime(m.group(2), "%H:%M")
+        except ValueError:
+            continue
+        entries.append((start_t, end_t, action))
+    return entries
+
+
+def _walk_schedule_chain(entries, window_start, window_end):
+    """Greedy in-order walk of a contiguous tiling from window_start to
+    window_end. Skips restated/duplicate/annotation lines whose start does
+    not continue the chain, which also enforces the original validator's
+    sum(durations) == window contract by construction. Returns
+    [[action, minutes], ...] or None if no chain covers the window."""
+    current = window_start
+    ret = []
+    for start_t, end_t, action in entries:
+        if current == window_end:
+            break
+        if start_t != current or end_t < start_t:
+            continue
+        ret.append([action, int((end_t - start_t).total_seconds() / 60)])
+        current = end_t
+    if ret and current == window_end:
+        return ret
+    return None
+
+
+def _parse_new_decomp_schedule(gpt_response, prompt=""):
+    """Parse a revised schedule out of a new_decomp_schedule response.
+
+    Qwen3 answers in three shapes: (1) a full markdown restatement of the
+    revised schedule, (2) a mid-line completion of the prompt's dangling
+    "HH:MM ~" line, (3) standalone lines restarting at the dangling time.
+    Try each; a result is only accepted when it tiles the scheduling window
+    exactly (same contract the original " -- " parser + validator enforced).
+    """
+    x = prompt.split("\n")[0].split("originally planned schedule from")[-1].strip()[:-1]
+    x = [datetime.datetime.strptime(i.strip(), "%H:%M %p") for i in x.split(" to ")]
+    window_start = datetime.datetime.strptime(x[0].strftime("%H:%M"), "%H:%M")
+    window_end = datetime.datetime.strptime(x[1].strftime("%H:%M"), "%H:%M")
+
+    resp = gpt_response.strip()
+    ret = _walk_schedule_chain(_sched_entries(resp), window_start, window_end)
+    if ret is not None:
+        return ret
+    for glue, r in ((" ", resp.lstrip("~ \t")), ("\n", resp)):
+        text = (prompt + glue + r).split("The revised schedule:")[-1].strip()
+        ret = _walk_schedule_chain(_sched_entries(text), window_start, window_end)
+        if ret is not None:
+            return ret
+    raise ValueError("new_decomp: no contiguous schedule covers the window")
+
+
+def _parse_focal_pt_candidate(candidate):
+    """Focal-point questions from a list, a str-encoded list, or free lines.
+
+    ChatGPT_safe_generate_response's envelope extraction already returns the
+    decoded {"output": [...]} payload — a Python list — which the previous
+    str-only parser rejected on 100% of calib_008 envelope responses.
+    """
+    if isinstance(candidate, list):
+        ret = [str(q).strip() for q in candidate if str(q).strip()]
+        if not ret:
+            raise ValueError("focal_pt: empty list")
+        return ret
+    if not isinstance(candidate, str):
+        raise ValueError(f"focal_pt: unexpected type {type(candidate).__name__}")
+    s = _strip_scaffolding(candidate).strip()
+    if s.startswith("["):
+        try:
+            parsed = ast.literal_eval(s)
+            if isinstance(parsed, list):
+                return _parse_focal_pt_candidate(parsed)
+        except Exception:
+            pass
+    ret = []
+    for line in s.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^[\-\*•]\s*", "", line)
+        line = re.sub(r"^\d+[\.\)]\s*", "", line).strip()
+        if line:
+            ret.append(line)
+    if not ret:
+        raise ValueError("focal_pt: empty parse")
+    return ret
 
 
 ##############################################################################
@@ -56,8 +271,22 @@ def run_gpt_prompt_wake_up_hour(persona, test_input=None, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = int(gpt_response.strip().lower().split("am")[0])
-        return cr
+        # GPT-4 emits a bare "7am" / "7 am". Qwen3 may emit "7 AM",
+        # "Answer: 7am", "I'd say 7", or just "7". Strip scaffolding and
+        # extract the first integer in [0, 24).
+        s = _strip_scaffolding(gpt_response)
+        # Original strict path first (preserves GPT-4 baseline behavior).
+        try:
+            cr = int(s.strip().lower().split("am")[0])
+            if 0 <= cr < 24:
+                return cr
+        except Exception:
+            pass
+        # Lenient path: first integer in the response.
+        n = _extract_first_int(s)
+        if n is not None and 0 <= n < 24:
+            return n
+        raise ValueError(f"wake_up_hour: could not parse hour from {gpt_response!r}")
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -116,13 +345,35 @@ def run_gpt_prompt_daily_plan(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
+        # GPT-4 emits lines like "1) eat breakfast at 7:00 am" — split on
+        # ")" and check trailing digit of the next item to find boundaries.
+        # Qwen3 may use "1.", bullets, or no numbering; if the GPT-4 form
+        # extracts nothing, fall back to bullet/numbered line parsing.
+        s = _strip_scaffolding(gpt_response)
         cr = []
-        _cr = gpt_response.split(")")
+        _cr = s.split(")")
         for i in _cr:
+            if not i:
+                continue
             if i[-1].isdigit():
                 i = i[:-1].strip()
-                if i[-1] == "." or i[-1] == ",":
+                if i and i[-1] in (".", ","):
                     cr += [i[:-1].strip()]
+        if cr:
+            return cr
+        # Lenient fallback: numbered or bulleted lines.
+        for line in s.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            line = re.sub(r"^[\-\*•]\s*", "", line)
+            line = re.sub(r"^\d+[\.\)]\s*", "", line)
+            if line and line[-1] in (".", ","):
+                line = line[:-1].rstrip()
+            if line:
+                cr.append(line)
+        if not cr:
+            raise ValueError("daily_plan: could not parse any items")
         return cr
 
     def __func_validate(gpt_response, prompt=""):
@@ -223,7 +474,10 @@ def run_gpt_prompt_generate_hourly_schedule(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        # Qwen3 may echo "Answer:" or wrap in fences; strip first.
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("generate_hourly_schedule: empty response")
         if cr[-1] == ".":
             cr = cr[:-1]
         cr = cr.split("Activity:")[-1]
@@ -375,16 +629,17 @@ def run_gpt_prompt_task_decomp(persona,
         print("TOODOOOOOO")
         print(gpt_response)
         print("-==- -==- -==- ")
-        #gpt_response=gpt_response.strip()
+        # Strip Qwen3 prompt-leakage (Answer:, code fences, etc.).
+        gpt_response = _strip_scaffolding(gpt_response, persona.scratch.get_str_firstname())
         gpt_response=gpt_response.split('\n\n')[0]
         gpt_response=gpt_response.split("1. "+persona.scratch.get_str_firstname()+" is ")[-1]
 
         print("TOODOOOOOO")
         print(gpt_response)
-        print("-==- -==- -==- ")    
+        print("-==- -==- -==- ")
 
         # TODO SOMETHING HERE sometimes fails... See screenshot
-        temp = [i.strip() for i in gpt_response.split("\n")]
+        temp = [i.strip() for i in gpt_response.split("\n") if i.strip()]
         print("temppppppppppppppppppppppppppp: ",temp)
         _cr = []
         cr = []
@@ -394,18 +649,40 @@ def run_gpt_prompt_task_decomp(persona,
             else:
                 _cr += [i]
         print("_crrrrrrrrrrrrrrr: ",_cr)
-        for count, i in enumerate(_cr):
-            k = [j.strip() for j in i.split("(duration in minutes:")]
-            task = k[0]
-            if task[-1] == ".":
-                task = task[:-1]
-            duration = int(k[1].split(",")[0].strip())
-            cr += [[task, duration]]
-
-        print("crrrrrrrrrrrrrrr: ",cr)
 
         total_expected_min = int(prompt.split("(total duration in minutes")[-1]
                                  .split("):")[0].strip())
+
+        # GPT-4 path: every line carries "(duration in minutes: N, ...)".
+        # Qwen3 path: lines may be bare numbered tasks with no duration tail.
+        # If ANY line lacks the duration tail, fall back to evenly splitting
+        # the expected total across the N tasks (remainder to last).
+        has_durations = all("(duration in minutes:" in i for i in _cr if i)
+        if has_durations:
+            for count, i in enumerate(_cr):
+                k = [j.strip() for j in i.split("(duration in minutes:")]
+                task = k[0]
+                if task and task[-1] == ".":
+                    task = task[:-1]
+                duration = int(k[1].split(",")[0].strip())
+                cr += [[task, duration]]
+        else:
+            _log_fail_safe("task_decomp.__func_clean_up", "missing duration annotations; even-splitting")
+            n_tasks = max(1, len(_cr))
+            base = (total_expected_min // n_tasks)
+            # snap to 5-min increments to match GPT-4 expectations downstream
+            base = max(5, base - (base % 5))
+            durations = [base] * n_tasks
+            durations[-1] = total_expected_min - base * (n_tasks - 1)
+            for count, i in enumerate(_cr):
+                task = i.strip()
+                # strip leading numbering like "2. " if still present
+                task = re.sub(r"^\d+[\.\)]\s*", "", task).strip()
+                if task and task[-1] in ".,":
+                    task = task[:-1]
+                cr += [[task, durations[count]]]
+
+        print("crrrrrrrrrrrrrrr: ",cr)
 
         # TODO -- now, you need to make sure that this is the same as the sum of
         #         the current action sequence.
@@ -449,7 +726,7 @@ def run_gpt_prompt_task_decomp(persona,
         return gpt_response
 
     def get_fail_safe():
-        fs = ["asleep"]
+        fs = [["asleep", duration]]
         return fs
 
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 1000,
@@ -584,16 +861,17 @@ def run_gpt_prompt_task_decomp_v2(persona,
         print("TOODOOOOOO")
         print(gpt_response)
         print("-==- -==- -==- ")
-        #gpt_response=gpt_response.strip()
+        # Strip Qwen3 prompt-leakage (Answer:, code fences, etc.).
+        gpt_response = _strip_scaffolding(gpt_response, persona.scratch.get_str_firstname())
         gpt_response=gpt_response.split('\n\n')[0]
         gpt_response=gpt_response.split("1. "+persona.scratch.get_str_firstname()+" is ")[-1]
 
         print("TOODOOOOOO")
         print(gpt_response)
-        print("-==- -==- -==- ")        
+        print("-==- -==- -==- ")
 
         # TODO SOMETHING HERE sometimes fails... See screenshot
-        temp = [i.strip() for i in gpt_response.split("\n")]
+        temp = [i.strip() for i in gpt_response.split("\n") if i.strip()]
         print("temppppppppppppppppppppppppppp: ",temp)
         _cr = []
         cr = []
@@ -603,16 +881,35 @@ def run_gpt_prompt_task_decomp_v2(persona,
             else:
                 _cr += [i]
         print("_crrrrrrrrrrrrrrr: ",_cr)
-        for count, i in enumerate(_cr):
-            k = [j.strip() for j in i.split("(duration in minutes:")]
-            task = k[0]
-            if task[-1] == ".":
-                task = task[:-1]
-            duration = int(k[1].split(",")[0].strip())
-            cr += [[task, duration]]
-        print("crrrrrrrrrrrrrrr: ",_cr)
+
         total_expected_min = int(prompt.split("(total duration in minutes")[-1]
                                  .split("):")[0].strip())
+
+        # See task_decomp v1 for rationale: tolerate Qwen3 outputs that omit
+        # "(duration in minutes: ...)" by evenly dividing the expected total.
+        has_durations = all("(duration in minutes:" in i for i in _cr if i)
+        if has_durations:
+            for count, i in enumerate(_cr):
+                k = [j.strip() for j in i.split("(duration in minutes:")]
+                task = k[0]
+                if task and task[-1] == ".":
+                    task = task[:-1]
+                duration = int(k[1].split(",")[0].strip())
+                cr += [[task, duration]]
+        else:
+            _log_fail_safe("task_decomp_v2.__func_clean_up", "missing duration annotations; even-splitting")
+            n_tasks = max(1, len(_cr))
+            base = (total_expected_min // n_tasks)
+            base = max(5, base - (base % 5))
+            durations = [base] * n_tasks
+            durations[-1] = total_expected_min - base * (n_tasks - 1)
+            for count, i in enumerate(_cr):
+                task = i.strip()
+                task = re.sub(r"^\d+[\.\)]\s*", "", task).strip()
+                if task and task[-1] in ".,":
+                    task = task[:-1]
+                cr += [[task, durations[count]]]
+        print("crrrrrrrrrrrrrrr: ",_cr)
 
         # TODO -- now, you need to make sure that this is the same as the sum of
         #         the current action sequence.
@@ -656,7 +953,7 @@ def run_gpt_prompt_task_decomp_v2(persona,
         return gpt_response
 
     def get_fail_safe():
-        fs = ["asleep"]
+        fs = [["asleep", duration]]
         return fs
 
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 1000,
@@ -776,15 +1073,27 @@ def run_gpt_prompt_action_sector(action_description,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cleaned_response = gpt_response.split("}")[0]
+        # GPT-4 produces "{kitchen}". Qwen3 may produce "kitchen", "{kitchen",
+        # "Answer: {kitchen}", or "Answer: {kitchen". Strip scaffolding first,
+        # then take everything before "}" if present, else the whole thing.
+        s = _strip_scaffolding(gpt_response, persona.scratch.get_str_name())
+        # The "Answer: {" prefix may leave a stray "{" past _strip_scaffolding
+        # if it co-occurs with content; drop it explicitly.
+        if s.startswith("{"):
+            s = s[1:]
+        cleaned_response = s.split("}")[0].split("\n")[0].strip()
+        # Drop trailing punctuation that Qwen3 sometimes appends.
+        while cleaned_response and cleaned_response[-1] in ".,;:":
+            cleaned_response = cleaned_response[:-1].rstrip()
         return cleaned_response
 
     def __func_validate(gpt_response, prompt=""):
-        if len(gpt_response.strip()) < 1:
+        # Strict GPT-4 path required "}" and disallowed ",". Qwen3 often omits
+        # the closing brace. Accept either form; reject commas (multi-answer).
+        s = _strip_scaffolding(gpt_response)
+        if len(s.strip()) < 1:
             return False
-        if "}" not in gpt_response:
-            return False
-        if "," in gpt_response:
+        if "," in s.split("}")[0]:
             return False
         return True
 
@@ -895,15 +1204,22 @@ def run_gpt_prompt_action_arena(action_description,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cleaned_response = gpt_response.split("}")[0]
+        # Same Qwen3 leniency as action_sector: tolerate missing closing brace
+        # and "Answer: {" leakage. Returned value flows into arena.split(":")
+        # downstream, so stripping the stray "{" matters.
+        s = _strip_scaffolding(gpt_response, persona.scratch.get_str_name())
+        if s.startswith("{"):
+            s = s[1:]
+        cleaned_response = s.split("}")[0].split("\n")[0].strip()
+        while cleaned_response and cleaned_response[-1] in ".,;:":
+            cleaned_response = cleaned_response[:-1].rstrip()
         return cleaned_response
 
     def __func_validate(gpt_response, prompt=""):
-        if len(gpt_response.strip()) < 1:
+        s = _strip_scaffolding(gpt_response)
+        if len(s.strip()) < 1:
             return False
-        if "}" not in gpt_response:
-            return False
-        if "," in gpt_response:
+        if "," in s.split("}")[0]:
             return False
         return True
 
@@ -1034,6 +1350,17 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
         return True
         return True
 
+    # Headless emoji stub (Step 1c): pronunciatio is frontend-only cosmetics,
+    # so in headless runs skip the LLM call entirely. CRSEC_HEADLESS=1.
+    if os.environ.get("CRSEC_HEADLESS") == "1":
+        call_profiler.incr("pronunciatio_stub")
+        return "💬", ["💬", "", None, [action_description], "💬"]
+
+    cache_key = ("pronunciatio", action_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 4")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
@@ -1047,7 +1374,11 @@ def run_gpt_prompt_pronunciatio(action_description, persona, verbose=False):
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
+    print(f"[FAIL_SAFE] run_gpt_prompt_pronunciatio: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 15,
@@ -1079,15 +1410,14 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
-        cr = [i.strip() for i in cr.split(")")[0].split(",")]
-        return cr
+        # Qwen3 re-emits the full "(subject, predicate, object)" triple
+        # (100% of calib_008 calls) instead of completing "(SUBJ,". The
+        # shared parser drops the echoed subject using the primed prompt.
+        return _parse_event_triple_completion(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt="")
-            if len(gpt_response) != 2:
-                return False
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -1126,6 +1456,13 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
     #   return output, [output, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
+    # The prompt only depends on persona.name + action_description, so this
+    # key fully determines the prompt text (lossless memoization at temp 0).
+    cache_key = ("event_triple", persona.name, action_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     gpt_param = {"engine": "gpt-4-1106-preview", "max_tokens": 30,
                  "temperature": 0, "top_p": 1, "stream": False,
                  "frequency_penalty": 0, "presence_penalty": 0, "stop": ["\n"]}
@@ -1137,13 +1474,19 @@ def run_gpt_prompt_event_triple(action_description, persona, verbose=False):
     # __func_validate, __func_clean_up)
     output = GPT4_safe_generate_response_OLD(prompt, 3, fail_safe,
                                              __func_validate, __func_clean_up)
+    raw_output = output
     output = (persona.name, output[0], output[1])
 
     if debug or verbose:
         print_run_prompts(prompt_template, persona, gpt_param,
                           prompt_input, prompt, output)
 
-    return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    if raw_output is not fail_safe:
+        _memo_put(cache_key, ret)
+    else:
+        call_profiler.incr("event_triple_fail_safe")
+    return ret
 
 
 def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=False):
@@ -1156,7 +1499,9 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("act_obj_desc: empty response")
         if cr[-1] == ".": cr = cr[:-1]
         return cr
 
@@ -1173,7 +1518,9 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        cr = gpt_response.strip()
+        cr = _strip_scaffolding(gpt_response).strip()
+        if not cr:
+            raise ValueError("act_obj_desc(chat): empty response")
         if cr[-1] == ".": cr = cr[:-1]
         return cr
 
@@ -1198,6 +1545,8 @@ def run_gpt_prompt_act_obj_desc(act_game_object, act_desp, persona, verbose=Fals
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_act_obj_desc: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 30,
@@ -1225,15 +1574,13 @@ def run_gpt_prompt_act_obj_event_triple(act_game_object, act_obj_desc, persona, 
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        cr = gpt_response.strip()
-        cr = [i.strip() for i in cr.split(")")[0].split(",")]
-        return cr
+        # Same Qwen3 full-triple echo as run_gpt_prompt_event_triple (the two
+        # fns share the template); the primed subject here is the game object.
+        return _parse_event_triple_completion(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt="")
-            if len(gpt_response) != 2:
-                return False
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -1315,42 +1662,15 @@ def run_gpt_prompt_new_decomp_schedule(persona,
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        new_schedule = prompt + " " + gpt_response.strip()
-        new_schedule = new_schedule.split("The revised schedule:")[-1].strip()
-        new_schedule = new_schedule.split("\n")
-
-        ret_temp = []
-        for i in new_schedule:
-            ret_temp += [i.split(" -- ")]
-
-        ret = []
-        for time_str, action in ret_temp:
-            start_time = time_str.split(" ~ ")[0].strip()
-            end_time = time_str.split(" ~ ")[1].strip()
-            delta = datetime.datetime.strptime(end_time, "%H:%M") - datetime.datetime.strptime(start_time, "%H:%M")
-            delta_min = int(delta.total_seconds() / 60)
-            if delta_min < 0: delta_min = 0
-            ret += [[action, delta_min]]
-
-        return ret
+        # Chain-walk parser: tolerates Qwen3's markdown restatement (unicode
+        # dashes, bold times, prose headers) and both completion styles of the
+        # dangling "HH:MM ~" line. Only accepts a schedule that tiles the
+        # window exactly, which subsumes the old validator's duration check.
+        return _parse_new_decomp_schedule(gpt_response, prompt)
 
     def __func_validate(gpt_response, prompt=""):
         try:
-            gpt_response = __func_clean_up(gpt_response, prompt)
-            dur_sum = 0
-            for act, dur in gpt_response:
-                dur_sum += dur
-                if str(type(act)) != "<class 'str'>":
-                    return False
-                if str(type(dur)) != "<class 'int'>":
-                    return False
-            x = prompt.split("\n")[0].split("originally planned schedule from")[-1].strip()[:-1]
-            x = [datetime.datetime.strptime(i.strip(), "%H:%M %p") for i in x.split(" to ")]
-            delta_min = int((x[1] - x[0]).total_seconds() / 60)
-
-            if int(dur_sum) != int(delta_min):
-                return False
-
+            __func_clean_up(gpt_response, prompt)
         except:
             return False
         return True
@@ -1470,16 +1790,33 @@ def run_gpt_prompt_decide_to_talk(persona, target_persona, retrieved, test_input
         prompt_input += [target_persona.name]
         return prompt_input
 
+    def _extract_yes_no(s):
+        # GPT-4 reliably emits a bare "yes"/"no" after "Answer in yes or no:".
+        # Qwen3 emits "Yes.", "Yes, because...", or just "Yes" without the
+        # marker. Try: (1) text after marker, (2) first word of cleaned text,
+        # (3) any yes/no token anywhere.
+        s = _strip_scaffolding(s)
+        tail = s.split("Answer in yes or no:")[-1].strip().lower()
+        head = re.split(r"[\s,.;:!?]", tail.strip(), maxsplit=1)[0]
+        if head in ("yes", "no"):
+            return head
+        # Fall back to scanning the whole response for the first yes/no token.
+        m = re.search(r"\b(yes|no)\b", s.lower())
+        if m:
+            return m.group(1)
+        return None
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split("Answer in yes or no:")[-1].strip().lower() in ["yes", "no"]:
-                return True
-            return False
+            return _extract_yes_no(gpt_response) is not None
         except:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        return gpt_response.split("Answer in yes or no:")[-1].strip().lower()
+        ans = _extract_yes_no(gpt_response)
+        if ans is None:
+            raise ValueError(f"decide_to_talk: no yes/no in {gpt_response!r}")
+        return ans
 
     def get_fail_safe():
         fs = "yes"
@@ -1566,16 +1903,34 @@ def run_gpt_prompt_decide_to_react(persona, target_persona, retrieved, test_inpu
         prompt_input += [init_act_desc]
         return prompt_input
 
+    def _extract_option(s):
+        # GPT-4 emits "Answer: Option N" with N in {1,2,3}. Qwen3 may emit
+        # "Option 3", "Answer: 3", "I would choose option 3", or "3".
+        s = _strip_scaffolding(s)
+        tail = s.split("Answer: Option")[-1].strip().lower()
+        head = re.split(r"[\s,.;:!?]", tail.strip(), maxsplit=1)[0]
+        if head in ("1", "2", "3"):
+            return head
+        m = re.search(r"option\s*([123])\b", s.lower())
+        if m:
+            return m.group(1)
+        # Last resort: any standalone 1/2/3 in the response.
+        m = re.search(r"\b([123])\b", s)
+        if m:
+            return m.group(1)
+        return None
+
     def __func_validate(gpt_response, prompt=""):
         try:
-            if gpt_response.split("Answer: Option")[-1].strip().lower() in ["3", "2", "1"]:
-                return True
-            return False
+            return _extract_option(gpt_response) is not None
         except:
             return False
 
     def __func_clean_up(gpt_response, prompt=""):
-        return gpt_response.split("Answer: Option")[-1].strip().lower()
+        ans = _extract_option(gpt_response)
+        if ans is None:
+            raise ValueError(f"decide_to_react: no option in {gpt_response!r}")
+        return ans
 
     def get_fail_safe():
         fs = "3"
@@ -1776,6 +2131,8 @@ def run_gpt_prompt_summarize_conversation(persona, conversation, test_input=None
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_summarize_conversation: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 50,
@@ -1806,9 +2163,15 @@ def run_gpt_prompt_extract_keywords(persona, description, test_input=None, verbo
     def __func_clean_up(gpt_response, prompt=""):
         print("???")
         print(gpt_response)
-        gpt_response = gpt_response.strip().split("Emotive keywords:")
-        factual = [i.strip() for i in gpt_response[0].split(",")]
-        emotive = [i.strip() for i in gpt_response[1].split(",")]
+        # GPT-4 reliably emits "Factual..., ... Emotive keywords: ..., ...".
+        # Qwen3 may omit the "Emotive keywords:" header. If so, treat the
+        # whole response as a single comma-separated keyword list.
+        s = _strip_scaffolding(gpt_response).strip()
+        parts = s.split("Emotive keywords:")
+        factual = [i.strip() for i in parts[0].split(",")]
+        emotive = []
+        if len(parts) > 1:
+            emotive = [i.strip() for i in parts[1].split(",")]
         all_keywords = factual + emotive
         ret = []
         for i in all_keywords:
@@ -1948,8 +2311,23 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -1963,17 +2341,37 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
 
-    print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 7")  ########
+    # Keyed on (name, ISS, description): the ISS is part of the prompt and
+    # can change (e.g. revised "currently"), so it must be in the key for
+    # memoization to stay lossless.
+    cache_key = ("event_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
+
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
                  "temperature": 0, "top_p": 1, "stream": False,
                  "frequency_penalty": 0, "presence_penalty": 0, "stop": None}
@@ -1984,9 +2382,13 @@ def run_gpt_prompt_event_poignancy(persona, event_description, test_input=None, 
     special_instruction = "The output should ONLY contain ONE integer value on the scale of 1 to 10."  ########
     fail_safe = get_fail_safe()  ########
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
-                                            __chat_func_validate, __chat_func_clean_up, True)
+                                            __chat_func_validate, __chat_func_clean_up)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
+    print(f"[FAIL_SAFE] run_gpt_prompt_event_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2016,8 +2418,23 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2031,15 +2448,34 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
+
+    # See event_poignancy: ISS is in the prompt, so it's in the key.
+    cache_key = ("thought_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
 
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 8")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
@@ -2054,7 +2490,11 @@ def run_gpt_prompt_thought_poignancy(persona, event_description, test_input=None
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
+    print(f"[FAIL_SAFE] run_gpt_prompt_thought_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2084,8 +2524,23 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = int(gpt_response.strip())
-        return gpt_response
+        # GPT-4 returns a bare integer 1..10. Qwen3 may return "Score: 5",
+        # "5/10", "I'd rate it a 5.", or markdown-wrapped. Strip scaffolding
+        # and pull the first integer.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            return int(s.strip())
+        except Exception:
+            pass
+        n = _extract_first_int(s)
+        if n is None:
+            raise ValueError(f"poignancy: no integer in {gpt_response!r}")
+        # Clamp to 1..10 to keep downstream math sane.
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2099,15 +2554,34 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        gpt_response = int(gpt_response)
-        return gpt_response
+        # Same Qwen3 hardening as __func_clean_up — this is the path actually
+        # used by ChatGPT_safe_generate_response below.
+        s = _strip_scaffolding(gpt_response)
+        try:
+            n = int(str(s).strip())
+        except Exception:
+            n = _extract_first_int(str(s))
+        if n is None:
+            raise ValueError(f"poignancy(chat): no integer in {gpt_response!r}")
+        if n < 1:
+            n = 1
+        if n > 10:
+            n = 10
+        return n
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
+
+    # See event_poignancy: ISS is in the prompt, so it's in the key.
+    cache_key = ("chat_poignancy", persona.scratch.name,
+                 persona.scratch.get_str_iss(), event_description)
+    cached = _memo_get(cache_key)
+    if cached is not None:
+        return cached
 
     print("asdhfapsh8p9hfaiafdsi;ldfj as DEBUG 9")  ########
     gpt_param = {"engine": "gpt-3.5-turbo", "max_tokens": 15,
@@ -2122,7 +2596,11 @@ def run_gpt_prompt_chat_poignancy(persona, event_description, test_input=None, v
     output = ChatGPT_safe_generate_response(prompt, example_output, special_instruction, 3, fail_safe,
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
-        return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        ret = output, [output, prompt, gpt_param, prompt_input, fail_safe]
+        _memo_put(cache_key, ret)
+        return ret
+    print(f"[FAIL_SAFE] run_gpt_prompt_chat_poignancy: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 3,
@@ -2149,11 +2627,10 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
         return prompt_input
 
     def __func_clean_up(gpt_response, prompt=""):
-        gpt_response = "1) " + gpt_response.strip()
-        ret = []
-        for i in gpt_response.split("\n"):
-            ret += [i.split(") ")[-1]]
-        return ret
+        # Accepts a decoded {"output": [...]} list (what the envelope
+        # extraction actually hands over), a str-encoded list, or
+        # numbered/bulleted lines.
+        return _parse_focal_pt_candidate(gpt_response)
 
     def __func_validate(gpt_response, prompt=""):
         try:
@@ -2167,12 +2644,13 @@ def run_gpt_prompt_focal_pt(persona, statements, n, test_input=None, verbose=Fal
 
     # ChatGPT Plugin ===========================================================
     def __chat_func_clean_up(gpt_response, prompt=""):  ############
-        ret = ast.literal_eval(gpt_response)
-        return ret
+        # ast.literal_eval alone rejected every already-decoded list payload
+        # (54/72 calib_008 responses); the shared parser handles all shapes.
+        return _parse_focal_pt_candidate(gpt_response)
 
     def __chat_func_validate(gpt_response, prompt=""):  ############
         try:
-            __func_clean_up(gpt_response, prompt)
+            __chat_func_clean_up(gpt_response, prompt)
             return True
         except:
             return False
@@ -2218,18 +2696,41 @@ def run_gpt_prompt_insight_and_guidance(persona, statements, n, test_input=None,
 
     def __func_clean_up(gpt_response, prompt=""):
         print(gpt_response)
-        # gpt_response = "1. " + gpt_response.strip()
-        gpt_response = gpt_response.strip()
-        if gpt_response.split("\n")[0][0] != '1':
-            gpt_response = "1. " + gpt_response.strip()
+        gpt_response = _strip_scaffolding(gpt_response).strip()
+        if not gpt_response:
+            raise ValueError("insight_and_guidance: empty response")
+        if gpt_response.split("\n")[0][:1] != '1':
+            gpt_response = "1. " + gpt_response
         ret = dict()
         for i in gpt_response.split("\n"):
-            # row = i.split(". ")[1]
-            thought = i.split(". ")[1]
-            evi_raw = i.split("(because of ")[1].split(")")[0].strip()
-            evi_raw = re.findall(r'\d+', evi_raw)
-            evi_raw = [int(i.strip()) for i in evi_raw]
-            ret[thought] = evi_raw
+            i = i.strip()
+            if not i:
+                continue
+            # GPT-4: "1. Thought (because of 1, 2)". Qwen3 may emit just
+            # "1. Thought" or "- Thought". Tolerate missing evidence tail.
+            parts = i.split(". ", 1)
+            if len(parts) < 2:
+                # try alternate bullet styles
+                stripped = re.sub(r"^[\-\*•]\s*", "", i).strip()
+                stripped = re.sub(r"^\d+[\.\)]\s*", "", stripped).strip()
+                if not stripped:
+                    continue
+                thought_and_evi = stripped
+            else:
+                thought_and_evi = parts[1]
+            if "(because of " in thought_and_evi:
+                thought = thought_and_evi.split("(because of ")[0].strip()
+                evi_raw = thought_and_evi.split("(because of ")[1].split(")")[0].strip()
+                evi_raw = re.findall(r'\d+', evi_raw)
+                evi_raw = [int(j.strip()) for j in evi_raw]
+            else:
+                # No evidence tail — accept thought with empty evidence list.
+                thought = thought_and_evi.strip()
+                evi_raw = []
+            if thought:
+                ret[thought] = evi_raw
+        if not ret:
+            raise ValueError("insight_and_guidance: no parseable lines")
         return ret
 
     def __func_validate(gpt_response, prompt=""):
@@ -2308,6 +2809,8 @@ def run_gpt_prompt_agent_chat_summarize_ideas(persona, target_persona, statement
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat_summarize_ideas: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,
@@ -2372,6 +2875,8 @@ def run_gpt_prompt_agent_chat_summarize_relationship(persona, target_persona, st
                                             __chat_func_validate, __chat_func_clean_up, True)
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat_summarize_relationship: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,
@@ -2491,6 +2996,8 @@ def run_gpt_prompt_agent_chat(maze, persona, target_persona,
     # print ("HERE END JULY 23 -- ----- ") ########
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_agent_chat: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 2000,
@@ -2572,9 +3079,11 @@ def run_gpt_prompt_summarize_ideas(persona, statements, question, test_input=Non
     if debug or verbose:
         print_run_prompts(prompt_template, persona, gpt_param,
                          prompt_input, prompt, output)
-    
+
     if output != False:
         return output, [output, prompt, gpt_param, prompt_input, fail_safe]
+    print(f"[FAIL_SAFE] run_gpt_prompt_summarize_ideas: ChatGPT path returned False, using fail_safe", file=sys.stderr)
+    return fail_safe, [fail_safe, prompt, gpt_param, prompt_input, fail_safe]
     # ChatGPT Plugin ===========================================================
 
     # gpt_param = {"engine": "", "max_tokens": 150,

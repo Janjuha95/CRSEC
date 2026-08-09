@@ -21,12 +21,12 @@ DESIRED FORMAT: JSON
 }
 - i: the number of created norm.
 - $\theta \in \{descriptive, injunctive\}$ represents the norm's type:
-  - descriptive: simply indicate what most people do in a given situation. (Eg. Applause after a speaker's presentation£»Participate in community clean-up events.)
+  - descriptive: simply indicate what most people do in a given situation. (Eg. Applause after a speaker's presentationï¼›Participate in community clean-up events.)
   - injunctive: specify what ought to be done or what is disapproved behavior in a given situation (Eg. Drive on the right side of the road; No walking on the lawn).
-- description: summarize the norm using a subject-verb-object structure in a concise sentence. £¨Eg. No one is allowed to take photos in public restrooms.£©
+- description: summarize the norm using a subject-verb-object structure in a concise sentence. ï¼ˆEg. No one is allowed to take photos in public restrooms.ï¼‰
 - subject: subject in the description. (Eg. subject in the description "No pollution of rivers and lakes with chemicals and waste.": "anyone".)
 - predicate: predicate in the description. (Eg. predicate in the description "No pollution of rivers and lakes with chemicals and waste.": "do not pollute".)
-- object£ºobject and adverbial in the description. If there is no object and adverbial, please enter "object": "None." (Eg. object and adverbial in the description "No pollution of rivers and lakes with chemicals and waste.": "rivers and lakes with chemicals and waste". )
+- objectï¼šobject and adverbial in the description. If there is no object and adverbial, please enter "object": "None." (Eg. object and adverbial in the description "No pollution of rivers and lakes with chemicals and waste.": "rivers and lakes with chemicals and waste". )
 ---
 EXAMPLE:
 EXAMPLE INFO:

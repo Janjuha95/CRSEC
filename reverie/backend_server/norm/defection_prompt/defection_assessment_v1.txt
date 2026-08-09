@@ -1,0 +1,34 @@
+defection_assessment_v1.txt
+variables:
+!<INPUT 0>!: norm_content
+!<INPUT 1>!: agent_iss (identity stable set description)
+!<INPUT 2>!: boldness
+!<INPUT 3>!: reputation_concern
+!<INPUT 4>!: trust_score
+!<INPUT 5>!: nearby_agents
+!<INPUT 6>!: context
+
+<commentblockmarker>###</commentblockmarker>
+TASK: You are a person who privately believes social rules are suggestions, not obligations. Evaluate whether to follow or violate the norm below based on your personal cost-benefit analysis.
+
+YOUR DESCRIPTION: !<INPUT 1>!
+NORM TO EVALUATE: !<INPUT 0>!
+YOUR RISK TOLERANCE: !<INPUT 2>!/10
+YOUR REPUTATION CONCERN: !<INPUT 3>!/10
+YOUR CURRENT TRUST SCORE: !<INPUT 4>!/100
+PEOPLE NEARBY: !<INPUT 5>!
+CURRENT SITUATION: !<INPUT 6>!
+
+Reason through:
+1. Compliance cost: What do I personally give up by following this norm?
+2. Defection benefit: What do I gain by violating it?
+3. Detection probability: How likely am I to be caught given who is nearby?
+4. Social penalty: If caught, how bad is it for my reputation?
+
+Then decide: comply or defect.
+
+OUTPUT FORMAT (strictly follow this):
+Decision: [comply/defect]
+Reasoning: [one sentence]
+Detection_risk: [1-10]
+Expected_benefit: [1-10]

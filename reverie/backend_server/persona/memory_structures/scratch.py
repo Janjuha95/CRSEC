@@ -172,7 +172,18 @@ class Scratch:
     self.norm_evaluate_trigger_max = 100
     self.norm_evaluate_trigger_curr = self.norm_evaluate_trigger_max
 
-    if check_if_file_exists(f_saved): 
+    # DEFECTOR PARAMETERS (Axelrod framework)
+    self.agent_type = "citizen"       # "entrepreneur", "citizen", or "defector"
+    self.boldness = 0                 # 1-10, willingness to defect
+    self.vengefulness = 5             # 1-10, willingness to punish
+    self.risk_tolerance = 5           # 1-10, tolerance for detection risk
+    self.reputation_concern = 5       # 1-10, how much they care about reputation
+    self.trust_score = 100            # starts at 100, decays on violations
+    self.reputation_beliefs = {}      # {agent_name: trust_score}
+    self.violation_history = []       # list of dicts
+    self.observed_violations = []     # list of dicts
+
+    if check_if_file_exists(f_saved):
       # If we have a bootstrap file, load that here. 
       scratch_load = json.load(open(f_saved))
 
@@ -257,6 +268,16 @@ class Scratch:
       self.norm_evaluate_trigger_max = scratch_load["norm_evaluate_trigger_max"]
       self.norm_evaluate_trigger_curr = scratch_load["norm_evaluate_trigger_curr"]
 
+      self.agent_type = scratch_load.get("agent_type", scratch_load.get("identity", "citizen"))
+      self.boldness = scratch_load.get("boldness", 0)
+      self.vengefulness = scratch_load.get("vengefulness", 5)
+      self.risk_tolerance = scratch_load.get("risk_tolerance", 5)
+      self.reputation_concern = scratch_load.get("reputation_concern", 5)
+      self.trust_score = scratch_load.get("trust_score", 100)
+      self.reputation_beliefs = scratch_load.get("reputation_beliefs", {})
+      self.violation_history = scratch_load.get("violation_history", [])
+      self.observed_violations = scratch_load.get("observed_violations", [])
+
 
   def save(self, out_json):
     """
@@ -340,8 +361,18 @@ class Scratch:
     scratch["norm_evaluate_trigger_max"] = self.norm_evaluate_trigger_max
     scratch["norm_evaluate_trigger_curr"] = self.norm_evaluate_trigger_curr
 
+    scratch["agent_type"] = self.agent_type
+    scratch["boldness"] = self.boldness
+    scratch["vengefulness"] = self.vengefulness
+    scratch["risk_tolerance"] = self.risk_tolerance
+    scratch["reputation_concern"] = self.reputation_concern
+    scratch["trust_score"] = self.trust_score
+    scratch["reputation_beliefs"] = self.reputation_beliefs
+    scratch["violation_history"] = self.violation_history
+    scratch["observed_violations"] = self.observed_violations
+
     with open(out_json, "w") as outfile:
-      json.dump(scratch, outfile, indent=2) 
+      json.dump(scratch, outfile, indent=2)
 
 
   def get_f_daily_schedule_index(self, advance=0):
@@ -448,7 +479,11 @@ class Scratch:
     return commonset
 
 
-  def get_str_name(self): 
+  def is_defector(self):
+    return self.agent_type == "defector"
+
+
+  def get_str_name(self):
     return self.name
 
 
